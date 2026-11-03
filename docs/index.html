@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Forex Monitor – XAUUSD · EURUSD</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>📈 Forex Monitor</h1>
+    <div class="sub">RealMarketAPI M5 (tiap 30 menit) → M15 · H1 · H4 · D · W &nbsp;|&nbsp; waktu WIB</div>
+  </div>
+  <div class="top-right">
+    <span id="age" class="pill">memuat…</span>
+    <button type="button" id="refresh" class="btn">⟳ Refresh</button>
+  </div>
+</header>
+
+<main>
+  <section class="grid2">
+    <div class="card">
+      <h2>System Status</h2>
+      <ul id="status" class="status"></ul>
+      <div class="quota">
+        <div class="quota-head"><span>Request RealMarketAPI bulan ini</span><b id="quota-text">-</b></div>
+        <div class="bar"><div id="quota-bar"></div></div>
+      </div>
+      <div id="warnings"></div>
+    </div>
+    <div class="card">
+      <h2>Market Overview</h2>
+      <div class="table-wrap">
+        <table class="tbl" id="overview">
+          <thead><tr><th>Pair</th><th>Harga</th><th>Bias H4</th><th>Trend H1</th><th>Signal</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="note">Dashboard hanya membaca hasil analisis terakhir. Refresh berapa kali pun = 0 request ke RealMarketAPI.</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="toolbar">
+      <div class="tabs" id="pair-tabs" role="tablist"></div>
+      <div class="tabs" id="tf-tabs" role="tablist"></div>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="t-ema" checked> EMA20/50</label>
+      <label><input type="checkbox" id="t-zone" checked> FVG / OB</label>
+      <label><input type="checkbox" id="t-struct" checked> BOS / CHoCH</label>
+      <label><input type="checkbox" id="t-setup" checked> Entry / SL / TP</label>
+    </div>
+    <div id="chart" class="chart"></div>
+    <img id="chart-png" class="chart-png" alt="Chart" hidden>
+    <div class="legend">
+      <span><i style="background:#f59e0b"></i>EMA20</span>
+      <span><i style="background:#38bdf8"></i>EMA50</span>
+      <span><i style="background:#22c55e"></i>Bullish / TP</span>
+      <span><i style="background:#ef4444"></i>Bearish / SL</span>
+      <span>Candle pudar = belum close</span>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="card" id="decision"></div>
+    <div class="card" id="tf-detail"></div>
+  </section>
+
+  <section class="card">
+    <h2 id="matrix-title">Multi-Timeframe</h2>
+    <div class="table-wrap">
+      <table class="tbl" id="matrix">
+        <thead><tr><th>TF</th><th>Trend</th><th>Struktur terakhir</th><th>EMA20</th><th>EMA50</th><th>RSI</th><th>Signal</th><th>Candle</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="foot">Bukan nasihat keuangan. Sinyal dihasilkan aturan otomatis (struktur BOS/CHoCH, EMA, RSI, FVG/OB) dan perlu verifikasi Anda sendiri.</p>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
