@@ -1,0 +1,87 @@
+name: Market Engine (Forex 30 mnt + Crypto 10 mnt + Dashboard)
+on:
+  schedule:
+    - cron: "3,13,23,33,43,53 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["docs/**", "engine/**", ".github/workflows/engine.yml"]
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: market-engine
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ambil data tersimpan (branch data)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: data
+          path: store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Terapkan lazy loading candle
+        run: python engine/lazy_patch.py
+      - name: Jalankan engine
+        env:
+          REALMARKET_API_KEY: ${{ secrets.REALMARKET_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SYMBOLS: ${{ vars.SYMBOLS }}
+          CRYPTO_SYMBOLS: ${{ vars.CRYPTO_SYMBOLS }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
+          ALERT_TFS: ${{ vars.ALERT_TFS }}
+          SETUP_MIN_OK: ${{ vars.SETUP_MIN_OK }}
+          ALERT_SIGNAL: ${{ vars.ALERT_SIGNAL }}
+          ALERT_WITH_CHART: ${{ vars.ALERT_WITH_CHART }}
+          ALERT_WHALE: ${{ vars.ALERT_WHALE }}
+          LARGE_TRADE_USD: ${{ vars.LARGE_TRADE_USD }}
+          ORDERFLOW_FILTER: ${{ vars.ORDERFLOW_FILTER }}
+          SKIP_WEEKEND: ${{ vars.SKIP_WEEKEND }}
+          DAY_START_UTC_HOUR: ${{ vars.DAY_START_UTC_HOUR }}
+        run: |
+          mkdir -p store _site
+          rm -rf store/.git
+          cp -r docs/. _site/
+          cd engine && python main.py --store ../store --site ../_site
+      - name: Cek hasil lazy loading
+        run: |
+          test -f _site/data/state.json || { echo "::error::state.json tidak dibuat engine"; exit 1; }
+          grep -q 'v10-lazy' _site/app.js || { echo "::error::app.js lazy loading belum terpasang"; exit 1; }
+          grep -q 'history-badge' _site/index.html || { echo "::error::badge lazy loading belum terpasang"; exit 1; }
+          python - <<'PY'
+          import glob, json, time
+          s = json.load(open("_site/data/state.json"))
+          age = (time.time() - s["updated_ts"]) / 60
+          chunks = glob.glob("_site/data/history/*.json")
+          print(f"updated_ts {s['updated_ts']} ({age:.1f} mnt lalu), pair: {list(s.get('pairs', {}))}")
+          print(f"lazy history chunks: {len(chunks)}")
+          PY
+      - name: Simpan data ke branch data
+        run: |
+          cd store
+          git init -q -b data
+          git config user.name "market-engine"
+          git config user.email "market-engine@users.noreply.github.com"
+          git add -A
+          git commit -q -m "data $(date -u +%Y-%m-%dT%H:%MZ)" || echo "tidak ada perubahan"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
