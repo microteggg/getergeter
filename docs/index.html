@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="theme-color" content="#ffffff">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta http-equiv="Cache-Control" content="no-cache">
+<title>Market Monitor – Forex & Crypto SMC</title>
+<link rel="stylesheet" href="style.css?v=11">
+</head>
+<body>
+<header class="tv-top">
+  <div class="brand">📈 <b>Market Monitor</b></div>
+  <div class="grp" id="pair-tabs" role="tablist" aria-label="Pair"></div>
+  <div class="grp" id="tf-tabs" role="tablist" aria-label="Timeframe"></div>
+  <div class="grp right">
+    <span id="live" class="pill" hidden></span>
+    <span id="age" class="pill">memuat…</span>
+    <button type="button" id="refresh" class="tbtn" title="Muat ulang data">⟳</button>
+  </div>
+</header>
+
+<div class="tv-sub">
+  <details class="toggles" id="toggles" open>
+    <summary>Indikator</summary>
+    <label><input type="checkbox" data-k="ema" checked> MA 20/50/200</label>
+    <label><input type="checkbox" data-k="struct" checked> Internal / Swing BOS-CHoCH</label>
+    <label><input type="checkbox" data-k="iob" checked> Internal OB</label>
+    <label><input type="checkbox" data-k="sob" checked> Swing OB</label>
+    <label><input type="checkbox" data-k="fvg" checked> FVG Hybrid</label>
+    <label><input type="checkbox" data-k="levels" checked> EQH/EQL + Strong/Weak</label>
+    <label><input type="checkbox" data-k="pd" checked> Premium / Equilibrium / Discount</label>
+    <label><input type="checkbox" data-k="mit"> Zona termitigasi</label>
+    <label><input type="checkbox" data-k="sweep" checked> Sweep</label>
+    <label><input type="checkbox" data-k="setup" checked> Entry / SL / TP</label>
+    <label><input type="checkbox" data-k="vol" checked> Volume</label>
+    <label class="cr-only"><input type="checkbox" data-k="cvd" checked> Delta / CVD</label>
+    <label><input type="checkbox" data-k="table" checked> Tabel monitoring</label>
+  </details>
+  <div class="zoom">
+    <button type="button" class="tbtn" id="zoom-out" title="Zoom out">−</button>
+    <button type="button" class="tbtn" id="zoom-in" title="Zoom in">+</button>
+    <button type="button" class="tbtn" id="zoom-reset" title="Reset tampilan">⤢</button>
+  </div>
+</div>
+
+<div class="main-row">
+  <section class="chart-wrap">
+    <button type="button" id="legend-btn" class="legend-btn" aria-controls="legend">▾ Info</button>
+    <div id="legend" class="legend"></div>
+    <canvas id="cv" aria-label="Chart candlestick"></canvas>
+    <div id="yaxis" class="yaxis" title="Tarik atas/bawah: ubah skala harga · klik 2x: AUTO"></div>
+    <button type="button" id="yauto" class="yauto" hidden title="Skala harga otomatis">AUTO</button>
+    <div id="pine-table" class="pine-table"></div>
+    <div id="chart-msg" class="chart-msg" hidden></div>
+  </section>
+  <aside class="side cr-only" id="side">
+    <div class="side-box">
+      <div class="side-h"><span>Order Book</span><span id="book-src" class="muted"></span></div>
+      <div id="book" class="book"></div>
+    </div>
+    <div class="side-box">
+      <div class="side-h"><span>Transaksi (Done)</span><span id="tape-src" class="muted"></span></div>
+      <div id="tape" class="tape"></div>
+    </div>
+  </aside>
+</div>
+
+<section class="panels">
+  <div class="panel" id="p-decision"></div>
+  <div class="panel" id="p-detail"></div>
+  <div class="panel" id="p-flow"></div>
+</section>
+
+<section class="panel wide">
+  <h3 id="mtf-title">Multi-Timeframe</h3>
+  <div class="tbl-wrap">
+    <table class="tbl" id="mtf">
+      <thead><tr><th>TF</th><th>Struktur</th><th>Event</th><th>Sweep</th><th>MA20</th><th>MA50</th><th>RSI</th><th>ATR14</th><th class="cr-col">Buy vol 20</th><th>Signal</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+<section class="panel wide" id="p-status"></section>
+<p class="foot">Forex: RealMarketAPI M5 tiap ±30 menit · Crypto: Binance M1 tiap ±10 menit + live WebSocket di browser · Bukan nasihat keuangan.</p>
+<script src="app.js?v=11"></script>
+  <!-- Tombol ke halaman Footprint -->
+<a href="footprint.html" id="fpLink"
+   style="position:fixed;right:14px;bottom:18px;z-index:9999;
+          background:#1f6feb;color:#fff;padding:10px 16px;border-radius:24px;
+          font:600 14px system-ui,sans-serif;text-decoration:none;
+          box-shadow:0 4px 12px rgba(0,0,0,.3)">👣 Footprint</a>
+</body>
+</html>
