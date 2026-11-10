@@ -1,7 +1,7 @@
 name: Market Engine (Forex 30 mnt + Crypto 10 mnt + Dashboard)
 on:
   schedule:
-    - cron: "3,13,23,33,43,53 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
   push:
     branches: [main]
