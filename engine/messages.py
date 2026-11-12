@@ -115,10 +115,16 @@ def fib_line(fb, d, prefix=""):
         return f"{prefix}Fib: belum ada impuls valid"
     bull = fb["dir"] == "bull"
     g = fb.get("gold") or [None, None]
-    return (f"{prefix}Fib {fb['tf']} {'🟢 bullish' if bull else '🔴 bearish'} ({fb['scope']}"
-            f"{', invalid' if fb.get('status') == 'invalid' else ''}): 100% {f(fb['anchor100']['price'], d)} → "
-            f"0% {f(fb['anchor0']['price'], d)} · retrace {fb.get('retrace') if fb.get('retrace') is not None else '-'}%"
-            f" ({fb.get('zone') or '-'}) · zona 50–61.8 {f(g[0], d)}–{f(g[1], d)}")
+    status = str(fb.get("status") or "FORMING").upper()
+    ext = ""
+    if status == "EXTENDED":
+        ext = " · EXT " + ", ".join(f"{x['notation']}={f(x['price'], d)}" for x in (fb.get("extensions") or []))
+    prev = " · Fib sebelumnya tersimpan" if fb.get("previous") else ""
+    cluster = " · " + ", ".join(z.get("label", "Fib cluster") for z in fb.get("clusters") or []) if fb.get("clusters") else ""
+    return (f"{prefix}Fib {fb['tf']} {'🟢 bullish' if bull else '🔴 bearish'} [{status}] ({fb['scope']}): "
+            f"100% {f(fb['anchor100']['price'], d)} → 1.0/0% {f(fb['anchor0']['price'], d)} · "
+            f"retrace {fb.get('retrace') if fb.get('retrace') is not None else '-'}%"
+            f" ({fb.get('zone') or '-'}) · zona 50–61.8 {f(g[0], d)}–{f(g[1], d)}{ext}{prev}{cluster}")
 
 
 def monitor_text(st):

@@ -7,6 +7,9 @@ Dipindai pada MONITOR_TF (default M15), hanya candle tertutup, tanpa lookahead:
   OB_NEW          Order Block baru terbentuk                  (default: hanya dicatat)
   HTF_FIB         harga menyentuh level Fib utama (H4) 38.2 / 50 / 61.8 / 78.6 – sekali per siklus fib
   LOCAL_FIB       harga menyentuh Fib lokal M15 50 / 61.8 / 78.6 (default: hanya dicatat)
+  FIB_LOCKED      pivot ujung + retrace 23,6% mengunci anchor
+  FIB_EXTENDED    close melewati 1.0 mengaktifkan target extension
+  FIB_REPLACED    HL→HH / LH→LL lengkap; Fib baru mengganti Fib lama
   FIB_INVALID     close menembus 100% Fib utama (H4)
   OB_FVG_OVERLAP  harga retest area overlap OB + FVG searah
   CONFLUENCE      retest POI (OB/FVG) M15 searah Fib H4 & berada di area H4 38.2–78.6, skor:
@@ -24,9 +27,11 @@ import fibo
 from resample import TF_SEC
 
 ICON = {"STRUCTURE": "🔄", "SWEEP": "💧", "FVG_NEW": "▫️", "OB_NEW": "▪️", "HTF_FIB": "📐", "LOCAL_FIB": "📏",
-        "FIB_INVALID": "❌", "OB_FVG_OVERLAP": "🧱", "CONFLUENCE": "⭐", "HTF_POI": "🎯"}
+        "FIB_LOCKED": "🔒", "FIB_EXTENDED": "🚀", "FIB_REPLACED": "♻️", "FIB_INVALID": "❌",
+        "OB_FVG_OVERLAP": "🧱", "CONFLUENCE": "⭐", "HTF_POI": "🎯"}
 NAME = {"STRUCTURE": "Struktur", "SWEEP": "Sweep liquidity", "FVG_NEW": "FVG baru", "OB_NEW": "Order Block baru",
-        "HTF_FIB": "Fib utama", "LOCAL_FIB": "Fib lokal", "FIB_INVALID": "Fib invalid",
+        "HTF_FIB": "Fib utama", "LOCAL_FIB": "Fib lokal", "FIB_LOCKED": "Fib locked",
+        "FIB_EXTENDED": "Fib extended", "FIB_REPLACED": "Fib replaced", "FIB_INVALID": "Fib invalid",
         "OB_FVG_OVERLAP": "OB + FVG overlap", "CONFLUENCE": "Confluence", "HTF_POI": "HTF POI"}
 FIB_TOUCH = {"HTF_FIB": (0.382, 0.5, 0.618, 0.786), "LOCAL_FIB": (0.5, 0.618, 0.786)}
 MAX_SCORE = 6
@@ -168,7 +173,7 @@ class Monitor:
             # ---- FIB touch (utama & lokal) ----
             for typ, fget, lab in (("HTF_FIB", htf, config.FIB_PRIMARY_TF), ("LOCAL_FIB", loc, tf)):
                 f = fget(j - 1)
-                if not f or not f["valid"]:
+                if not f or not f["valid"] or f.get("status") not in ("LOCKED", "EXTENDED"):
                     continue
                 key = (typ, f["id"])
                 hit = None
@@ -187,14 +192,24 @@ class Monitor:
                          f"Level {_pct(r)} = {_r(lv, d)} · {'low' if bull else 'high'} candle {_r(b['l'] if bull else b['h'], d)}",
                          "Retracement " + ("turun dari swing high" if bull else "naik dari swing low")],
                         rid=f"MN:{typ}:{f['id']}:{r}", fib_id=f["id"], ratio=r, level=_r(lv, d))
-            # ---- FIB utama invalid ----
-            fp, fc = htf(j - 1), htf(j)
-            if fp and fc and fp["leg_id"] == fc["leg_id"] and fp["valid"] and not fc["valid"]:
-                bull = fc["dir"] == "bull"
-                add(j, "FIB_INVALID", fc["dir"], f"Fib {config.FIB_PRIMARY_TF} invalid",
-                    [f"Close {'di bawah' if bull else 'di atas'} 100% "
-                     f"({_r(fc['lo'] if bull else fc['hi'], d)}) – impuls batal, tunggu leg baru"],
-                    rid=f"MN:FIBINV:{fc['leg_id']}")
+            # ---- Auto Fib v2 lifecycle (primary H4 + local monitor TF) ----
+            labels = {
+                "FIB_LOCKED": "LOCKED – anchor dikunci",
+                "FIB_EXTENDED": "EXTENDED – close melewati 1.0",
+                "FIB_REPLACED": "REPLACED – Fib baru aktif",
+                "FIB_INVALID": "INVALID – close menembus 100%",
+            }
+            for lab, fget in ((config.FIB_PRIMARY_TF, htf), (tf, loc)):
+                fs = fget(j)
+                for fe in (fs or {}).get("events") or []:
+                    typ = fe.get("type")
+                    if typ not in labels:
+                        continue
+                    add(j, typ, fe.get("dir") or fs["dir"], f"Fib {lab} {labels[typ]}",
+                        [fe.get("description") or labels[typ],
+                         f"Status {fs.get('status')} · scope swing · break 1.0/100% dinilai dengan close"],
+                        rid=f"MN:{fe['id']}", fib_id=fs.get("id"), previous_id=fe.get("previous_id"),
+                        status=fs.get("status"), quiet=False)
             # ---- POI retest: overlap & confluence ----
             for kind, z in pois:
                 if not alive(z, j) or z["created"] >= j - 1:

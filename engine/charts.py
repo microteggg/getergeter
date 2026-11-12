@@ -180,31 +180,48 @@ def render(path, symbol, tf, bars, an, digits, n_show=100):
                     color=DN, ha="center", fontsize=9, weight="bold",
                     arrowprops=dict(arrowstyle="-|>", color=DN), zorder=8)
 
-    # ---- v19: Auto Fibonacci (utama tebal oranye, lokal tipis abu-biru) ----
-    def draw_fib(fb, primary):
+    # ---- v22: Auto Fib v2 lifecycle, extension, previous dashed, cluster ----
+    def draw_fib(fb, primary, historical=False):
         if not fb or not fb.get("levels"):
             return
+        if not historical and fb.get("previous"):
+            draw_fib(fb["previous"], primary, True)
         col = FIB_MAIN if primary else FIB_LOCAL
         xa = max(0, xpos(min(fb["anchor100"]["t"], fb["anchor0"]["t"])))
-        if primary:
+        status = str(fb.get("status") or "FORMING").upper()
+        alpha = 0.42 if historical else 0.35 if status == "INVALID" else 0.65 if status == "FORMING" else 0.95
+        if primary and not historical:
             g = fb.get("gold") or []
             if len(g) == 2:
                 ax.add_patch(Rectangle((xa - 0.4, g[0]), n + 3 - xa, g[1] - g[0], facecolor=FIB_MAIN,
                                        alpha=0.10, edgecolor="none", zorder=1))
+            for z in fb.get("clusters") or []:
+                h = max(z["top"] - z["bottom"], max((max(b["h"] for b in bars) - min(b["l"] for b in bars)) * .001, 1e-12))
+                ax.add_patch(Rectangle((xa - .4, z["bottom"] - h * .05), n + 3 - xa, h * 1.1,
+                                       facecolor="#7c3aed", alpha=.16, edgecolor="none", zorder=1.2))
+                ax.text(xa + .5, z["top"], z.get("label", "Fib cluster"), color="#7c3aed", fontsize=6.3,
+                        ha="left", va="bottom", weight="bold", zorder=5)
         for lv in fb["levels"]:
-            if not primary and lv["r"] in (0.236,):
-                continue
             key = lv["r"] in (0.5, 0.618)
             ax.hlines(lv["price"], xa, n + 3, colors=col, linewidth=(1.3 if key else 0.8) if primary else 0.6,
-                      linestyles="-" if primary else "--", alpha=0.95 if primary else 0.7, zorder=3)
+                      linestyles="--" if historical or status == "FORMING" or not primary else "-", alpha=alpha, zorder=3)
             ax.text(n + 2.8 if primary else xa + 0.5, lv["price"],
                     f"{fb['tf']} {lv['r'] * 100:g}%" + (f" {lv['price']:.{digits}f}" if primary else ""),
-                    color=col, fontsize=6.3 if primary else 5.6, ha="right" if primary else "left",
+                    color=col, alpha=alpha, fontsize=6.3 if primary else 5.6, ha="right" if primary else "left",
                     va="bottom", zorder=4, clip_on=True)
-        if not primary:
+        if not historical and status == "EXTENDED":
+            for lv in fb.get("extensions") or []:
+                ax.hlines(lv["price"], xa, n + 3, colors=col, linewidth=1.15 if lv["x"] == 1.618 else .75,
+                          linestyles="--", alpha=.9, zorder=3)
+                ax.text(n + 2.8, lv["price"], f"EXT {lv['notation']} {lv['price']:.{digits}f}", color=col,
+                        fontsize=6.1, ha="right", va="bottom", zorder=4, clip_on=True)
+        if not primary or historical:
             x1 = xpos(fb["anchor0"]["t"])
             ax.plot([xa, x1], [fb["anchor100"]["price"], fb["anchor0"]["price"]], color=col,
-                    linestyle=":", linewidth=0.8, zorder=3)
+                    linestyle=":", linewidth=0.8, alpha=alpha, zorder=3)
+        if not historical:
+            ax.text(xa + .4, fb["anchor0"]["price"], f"{fb['tf']} {status} · 1.0", color=col, fontsize=6.6,
+                    ha="left", va="bottom", weight="bold", zorder=5)
 
     draw_fib(an.get("fib_primary"), True)
     draw_fib(an.get("fib_local"), False)

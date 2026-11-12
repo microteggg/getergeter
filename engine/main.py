@@ -1,4 +1,6 @@
-"""Engine utama (GitHub Actions cron tiap 5 menit) – v19.
+"""Engine utama (GitHub Actions cron tiap 5 menit) – v22.
+v22: Auto Fib v2 lifecycle + extension + previous Fib + cluster + persistent Fib history.
+v21: Phase 1 Market Intelligence live, non-blocking.
 v19: Auto Fibonacci (H4 utama + Fib lokal per TF), MODE MONITOR (BUY/SELL dinonaktifkan sementara; engine
      mengirim kejadian/setup untuk dicek manual), antrean Telegram + retry + log status per pesan,
      catatan run (trigger & durasi) untuk memantau scheduler.
@@ -30,9 +32,9 @@ from analysis import analyze_tf, overall
 from binance import Binance
 from charts import render
 from data_source import fetch_candles, fetch_history
+from fib_journal import FibJournal
+from intel import build as build_intelligence
 from journal import Journal, stats
-from intel import SnapshotStore, build_intelligence, telegram_suffix
-from intel.common import compact_snapshot
 from orderflow import book_metrics, flow_summary, trade_metrics
 from resample import TF_SEC, closed_only, resample, upsert
 from telegram_notify import send_message, send_photo
@@ -245,25 +247,19 @@ class Engine:
             tfs[tf] = an
         ov = overall(tfs, d)
         fib_primary = (tfs.get(config.FIB_PRIMARY_TF) or {}).get("fib")
-
-        # ----- Phase 1 Intelligence: read-only context over the canonical engine -----
-        intel_ctx = None
+        intel = None
         if config.INTEL_ENABLED:
             try:
-                intel_ctx = build_intelligence(sym, market, stores, tfs, self.now, price, d)
-                intel_store = SnapshotStore(self.store, sym)
-                intel_store.add(intel_ctx)
-                intel_store.save(os.path.join(self.site, "data", f"intel_{sym}.json"))
-            except Exception as e:      # intelligence failure must never stop legacy v20
+                intel = build_intelligence(sym, tfs, self.now)
+                jsave(os.path.join(self.store, "intel", f"{sym}.json"), intel)
+                jsave(os.path.join(self.site, "data", f"intel_{sym}.json"), intel)
+            except Exception as e:      # intelligence is deliberately non-blocking
                 self.warnings.append(f"Intel {sym} gagal: {e.__class__.__name__}: {e}")
-                intel_ctx = {"enabled": True, "mode": config.INTEL_MODE, "error": f"{e.__class__.__name__}: {e}",
-                             "blocking": False, "asof": self.now}
 
         # ----- jurnal permanen: setup semua TF + entry top-down, lalu nilai hasilnya -----
         jr = Journal(self.store, sym)
-        intel_journal = compact_snapshot(intel_ctx)
-        new_setups = {tf: jr.merge("setups", tfs[tf].get("setups", []), self.now, intel_journal) for tf in tfs_list}
-        new_entries = jr.merge("entries", ov.get("entries", []), self.now, intel_journal)
+        new_setups = {tf: jr.merge("setups", tfs[tf].get("setups", []), self.now) for tf in tfs_list}
+        new_entries = jr.merge("entries", ov.get("entries", []), self.now)
         entry_tfs = [tf for tf in ("M1", "M5", "M15", "H1") if tf in tfs_list]
         jr.update_outcomes(closed, entry_tfs)
         jr.save()
@@ -272,6 +268,13 @@ class Engine:
                    stats={"entries": stats(pub["entries"]),
                           "setups": {tf: stats([r for r in pub["setups"] if r["tf"] == tf]) for tf in tfs_list}})
         jsave(os.path.join(self.site, "data", f"journal_{sym}.json"), pub)
+
+        # ----- Auto Fib v2: lifecycle history is immutable and persists across runs -----
+        fj = FibJournal(self.store, sym)
+        fib_new = fj.merge(tfs, self.now)
+        fj.save()
+        fib_pub = fj.public()
+        jsave(os.path.join(self.site, "data", f"fib_history_{sym}.json"), fib_pub)
 
         # ----- chart JSON: SELURUH candle & overlay tersimpan (tidak dipotong) -----
         for tf in tfs_list:
@@ -321,7 +324,8 @@ class Engine:
         pair = {"market": market, "digits": d, "price": round(price, d), "last_ts": src[-1]["t"],
                 "received": received, "counts": {tf: len(stores[tf][-config.STORE_LIMIT[tf]:]) for tf in tfs_list},
                 "tf": tfs_small, "overall": ov_small, "journal": pub["stats"], "fib_primary": fib_primary,
-                "intel": intel_ctx, **extra}
+                "fib_history": {"events": len(fib_pub["events"]), "cycles": len(fib_pub["cycles"]),
+                                "new": len(fib_new)}, "intel": intel, **extra}
         if config.SIGNALS_ON:
             self.alerts(sym, pair, new_setups, new_entries, jr.closed_now)
             self.zone_alerts(sym, pair, tfs)
@@ -334,8 +338,6 @@ class Engine:
                 new = mon.scan(tfs, d, self.now)
                 self.monitors[sym] = mon
                 for rec in new:
-                    if rec.get("src") == "live" and intel_journal is not None:
-                        rec["intel"] = intel_journal
                     if rec["notif"] != "QUEUED":
                         continue
                     photo = None
@@ -345,8 +347,7 @@ class Engine:
                     prio = {"CONFLUENCE": 3, "OB_FVG_OVERLAP": 2, "HTF_FIB": 2}.get(rec["type"], 1)
                     if rec["type"] == "HTF_POI":     # v20
                         prio = {"POI": 2, "CHOCH": 3, "CONFIRMED": 3}.get(rec.get("stage"), 1)
-                    self.notify(monitor.message(sym, rec, d, price) + telegram_suffix(intel_ctx),
-                                photo, prio=prio, key=rec["id"], sym=sym)
+                    self.notify(monitor.message(sym, rec, d, price), photo, prio=prio, key=rec["id"], sym=sym)
                 pair["monitor"] = mon.summary()
             except Exception as e:      # noqa: BLE001 – monitor gagal tidak boleh menghentikan engine
                 self.warnings.append(f"Monitor {sym} gagal: {e.__class__.__name__}: {e}")
@@ -396,10 +397,6 @@ class Engine:
             self.warnings.append(f"Chart {sym} {tf} gagal dibuat: {e}")
 
     # ---------- ALERT: 🟡 STRUCTURE -> 🟠 SETUP READY -> 🚨 ENTRY -> 🏁 HASIL ----------
-    @staticmethod
-    def _with_intel(text, pair):
-        return text + telegram_suffix((pair or {}).get("intel"))
-
     def alerts(self, sym, pair, new_setups, new_entries, closed_now):
         first = not self.p["init"].get(sym)
         for tf in config.ALERT_TFS:
@@ -415,19 +412,19 @@ class Engine:
                     continue
                 self.mark(k)
                 if not first:
-                    self.notify(self._with_intel(self.msg_structure(sym, tf, e, pair), pair), prio=1)
+                    self.notify(self.msg_structure(sym, tf, e, pair), prio=1)
         if not first:
             for s in new_setups.get(config.SETUP_TF, []):
                 if s["src"] == "live":
-                    self.notify(self._with_intel(self.msg_setup(sym, s, pair), pair), prio=2)
+                    self.notify(self.msg_setup(sym, s, pair), prio=2)
             for e in new_entries:
                 if e["src"] == "live":
                     photo = (os.path.join(self.store, "charts", f"{sym}_{config.SETUP_TF}.png")
                              if config.ALERT_WITH_CHART else None)
-                    self.notify(self._with_intel(self.msg_entry(sym, e, pair), pair), photo, prio=3)
+                    self.notify(self.msg_entry(sym, e, pair), photo, prio=3)
             for e in closed_now:
                 if e["src"] == "live":
-                    self.notify(self._with_intel(self.msg_result(sym, e, pair), pair), prio=2)
+                    self.notify(self.msg_result(sym, e, pair), prio=2)
         else:
             self.p["init"][sym] = self.now
             ov = pair["overall"]
@@ -474,7 +471,7 @@ class Engine:
                 if ev["stage"] == "CONFIRMED" and config.ALERT_WITH_CHART:
                     photo = os.path.join(self.store, "charts", f"{sym}_{tf}.png")
                 prio = {"CONFIRMED": 3, "SETUP": 2}.get(ev["stage"], 1)
-                self.notify(self._with_intel(self.msg_zone(sym, tf, z, ev, pair), pair), photo, prio=prio)
+                self.notify(self.msg_zone(sym, tf, z, ev, pair), photo, prio=prio)
 
     def msg_zone(self, sym, tf, z, ev, pair):
         d, bull, st = pair["digits"], z["dir"] == "bull", ev["stage"]
@@ -730,10 +727,7 @@ class Engine:
             self.warnings.append(f"Engine sempat tidak berjalan ±{gap_now:.0f} menit sebelum run ini "
                                  f"(trigger sekarang: {trig}). Cek scheduler / watchdog Cloudflare.")
         st = {
-            "version": 21, "mode": config.SIGNAL_MODE, "updated_ts": self.now, "telegram_ok": self.tg_ok,
-            "intel": {"enabled": config.INTEL_ENABLED, "mode": config.INTEL_MODE,
-                      "blocking": False, "version": 1,
-                      "description": "Live decision-support context; never gates legacy signals."},
+            "version": 20, "mode": config.SIGNAL_MODE, "updated_ts": self.now, "telegram_ok": self.tg_ok,
             "telegram": {"sent": getattr(self, "tg_sent", 0), "failed": getattr(self, "tg_fail", 0),
                          "configured": telegram_notify.configured(),
                          "pending_retry": len(self.p.get("tg_queue") or []),

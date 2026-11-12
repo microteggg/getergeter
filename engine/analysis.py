@@ -244,6 +244,7 @@ def analyze_tf(tf, closed, price, digits):
     lb = bars[-1]
     # v19: Auto Fibonacci TF ini (anchor dari leg BOS/CHoCH, lihat fibo.py)
     fib_pub, fib_legs, fib_series = fibo.build(bars, smc, atr14, tf, digits, price)
+    fib_history = fib_pub.pop("_history", []) if fib_pub else []
     pools_active = [dict(p, label=p["label"]) for p in smc["liquidity"]]
     result.update(
         trend=trend, structure=sdir or idir, internal_structure=idir, swing_structure=sdir,
@@ -266,7 +267,7 @@ def analyze_tf(tf, closed, price, digits):
         setups=first, zones=zones, fib=fib_pub,
         # internal (tidak ditulis ke state.json): dipakai decide() & journal
         _on=on, _setups=setups, _times=[b["t"] for b in bars], _closes=[b["c"] for b in bars],
-        _bars=bars, _smc=smc, _atr14=atr14, _fib_series=fib_series,
+        _bars=bars, _smc=smc, _atr14=atr14, _fib_series=fib_series, _fib_history=fib_history,
         series={"times": [b["t"] for b in bars], "ma20": ma20, "ma50": ma50, "ma200": ma200},
     )
     return result

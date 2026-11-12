@@ -102,7 +102,7 @@ class Journal:
         self.entries = data.get("entries", {})
         self.closed_now = []          # entry yang baru selesai (FULL: TP2/SL) pada run ini
 
-    def merge(self, kind, recs, now, intel=None):
+    def merge(self, kind, recs, now):
         """Tambahkan record baru. Return list record baru."""
         book = self.setups if kind == "setups" else self.entries
         new = []
@@ -111,13 +111,7 @@ class Journal:
                 continue
             sec = TF_SEC.get(r.get("tf"), 900)
             rec = {k: v for k, v in r.items() if not k.startswith("_")}
-            src = "live" if r["close_t"] >= now - 2 * sec else "replay"
-            rec.update(symbol=self.sym, first_seen=now, src=src)
-            # Phase 1: immutable context as it was when this record first appeared.
-            # Replay records are not stamped with today's context: reconstructing a
-            # historical score requires a dedicated candle-by-candle replay.
-            if intel is not None and src == "live":
-                rec["intel"] = intel
+            rec.update(symbol=self.sym, first_seen=now, src="live" if r["close_t"] >= now - 2 * sec else "replay")
             rec.update(outcome(rec, []))
             book[r["id"]] = rec
             new.append(rec)

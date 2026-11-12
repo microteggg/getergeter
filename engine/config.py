@@ -77,18 +77,7 @@ LARGE_TRADE_USD = float(_get("LARGE_TRADE_USD", "0"))
 STORE_LIMIT = {"M1": 4400, "M5": 6000, "M15": 4000, "H1": 4000, "H4": 3000, "D": 2000, "W": 1000}
 CHART_BARS = dict(STORE_LIMIT)
 JOURNAL_SETUP_LIMIT = int(_get("JOURNAL_SETUP_LIMIT", "3000"))   # per TF; entry tidak dibatasi
-ENGINE_VERSION = "v21-phase1-intelligence"
-
-# ---------- Phase 1 Market Intelligence (langkah 0-6) ----------
-# LIVE = tampil di dashboard, ikut pada notifikasi Telegram, dan snapshot disimpan di
-# journal/intel history. Lapisan ini OBSERVATIONAL: tidak pernah menerima/menolak sinyal v20.
-# INTEL_ENABLED adalah kill switch; False mengembalikan alur keputusan v20 tanpa revert kode.
-INTEL_ENABLED = _bool("INTEL_ENABLED", True)
-INTEL_MODE = _get("INTEL_MODE", "live").lower()
-if INTEL_MODE not in ("live", "shadow"):
-    INTEL_MODE = "live"
-INTEL_HISTORY_LIMIT = int(_get("INTEL_HISTORY_LIMIT", "5000"))
-INTEL_REGIME_LOOKBACK = int(_get("INTEL_REGIME_LOOKBACK", "20"))
+ENGINE_VERSION = "v22-auto-fib-v2"
 
 # ---------- Strategi top-down ----------
 BIAS_TF = _get("BIAS_TF", "H4")
@@ -177,11 +166,19 @@ if SIGNAL_MODE not in ("monitor", "signal"):
     SIGNAL_MODE = "monitor"
 SIGNALS_ON = SIGNAL_MODE == "signal"
 
-# ---------- v19: Auto Fibonacci (fibo.py) ----------
+# ---------- v22: Auto Fibonacci v2 (fibo.py) ----------
 FIB_ENABLED = _bool("FIB_ENABLED", True)
 FIB_PRIMARY_TF = _get("FIB_PRIMARY_TF", "H4").upper()        # Fib utama (tebal) – tampil di semua TF
 FIB_MIN_ATR = float(_get("FIB_MIN_ATR", "1.0"))              # leg impuls minimal N x ATR14 TF tsb
-FIB_FALLBACK_INTERNAL = _bool("FIB_FALLBACK_INTERNAL", True) # fib swing invalid -> pakai leg internal valid
+FIB_LOCK_RETRACE = float(_get("FIB_LOCK_RETRACE", "0.236"))  # pullback minimum sebelum LOCKED/replacement
+FIB_FALLBACK_INTERNAL = False                                  # v2: internal tidak pernah mengganti Fib utama
+FIB_HISTORY_LIMIT = int(_get("FIB_HISTORY_LIMIT", "10000"))  # lifecycle events per pair (persisten)
+
+# ---------- Phase 1 v21: Market Intelligence (live, non-blocking) ----------
+INTEL_ENABLED = _bool("INTEL_ENABLED", True)
+INTEL_MODE = _get("INTEL_MODE", "live").lower()
+INTEL_REGIME_LOOKBACK = int(_get("INTEL_REGIME_LOOKBACK", "100"))
+INTEL_MIN_COVERAGE = float(_get("INTEL_MIN_COVERAGE", "0.90"))
 
 # ---------- v19: Monitoring kejadian/setup (monitor.py) ----------
 MONITOR_SYMBOLS = _list("MONITOR_SYMBOLS", "XAUUSD")         # pair yang dicatat & dinotifkan
@@ -194,7 +191,7 @@ MONITOR_INTERNAL_STRUCTURE = _bool("MONITOR_INTERNAL_STRUCTURE", False)  # iBOS/
 # Tipe kejadian yang dikirim ke Telegram (lainnya hanya dicatat di dashboard):
 #   STRUCTURE, SWEEP, FVG_NEW, OB_NEW, HTF_FIB, LOCAL_FIB, FIB_INVALID, OB_FVG_OVERLAP, CONFLUENCE
 #   HTF_POI (v20)
-MONITOR_NOTIFY = _list("MONITOR_NOTIFY", "STRUCTURE,SWEEP,HTF_FIB,OB_FVG_OVERLAP,CONFLUENCE,HTF_POI")
+MONITOR_NOTIFY = _list("MONITOR_NOTIFY", "STRUCTURE,SWEEP,HTF_FIB,OB_FVG_OVERLAP,CONFLUENCE,HTF_POI,FIB_LOCKED,FIB_EXTENDED,FIB_REPLACED,FIB_INVALID")
 
 # ---------- v20: HTF POI -> CHoCH LTF (monitor.py) ----------
 # Harga MONITOR_TF masuk FVG/OB HTF_POI_TF -> CHoCH/iCHoCH searah -> BOS/iBOS lanjutan.
