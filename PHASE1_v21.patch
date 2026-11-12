@@ -1,0 +1,1726 @@
+diff -ruN original_repo/.github/workflows/engine.yml repo/.github/workflows/engine.yml
+--- original_repo/.github/workflows/engine.yml	2026-11-12 09:09:23.178251389 +0000
++++ repo/.github/workflows/engine.yml	2026-11-12 09:02:28.198974794 +0000
+@@ -71,6 +71,9 @@
+           MONITOR_TF: ${{ vars.MONITOR_TF }}
+           MONITOR_NOTIFY: ${{ vars.MONITOR_NOTIFY }}
+           MONITOR_CONFLUENCE_MIN: ${{ vars.MONITOR_CONFLUENCE_MIN }}
++          # v21 Phase 1 Intelligence: live dashboard + Telegram + journal, non-blocking.
++          INTEL_ENABLED: ${{ vars.INTEL_ENABLED || 'true' }}
++          INTEL_MODE: ${{ vars.INTEL_MODE || 'live' }}
+         run: |
+           mkdir -p store/candles store/journal store/private_state _site
+           rm -rf store/.git
+@@ -80,7 +83,7 @@
+       - name: Cek hasil build dashboard
+         run: |
+           test -f _site/data/state.json || { echo "::error::state.json tidak dibuat engine"; exit 1; }
+-          grep -q 'v19-fib-monitor' _site/app.js || echo "::warning::app.js bukan versi v19"
++          grep -q 'v21-phase1-intelligence' _site/app.js || { echo "::error::app.js bukan versi Phase 1 v21"; exit 1; }
+           test -f _site/app.js || { echo "::error::app.js tidak ditemukan"; exit 1; }
+           test -f _site/index.html || { echo "::error::index.html tidak ditemukan"; exit 1; }
+           grep -q 'v10-lazy' _site/app.js || { echo "::error::SMC v2 compatibility build belum terpasang"; exit 1; }
+diff -ruN original_repo/MANIFEST_PHASE1.md repo/MANIFEST_PHASE1.md
+--- original_repo/MANIFEST_PHASE1.md	1970-01-01 00:00:00.000000000 +0000
++++ repo/MANIFEST_PHASE1.md	2026-11-12 09:10:05.979335672 +0000
+@@ -0,0 +1,43 @@
++# Manifest paket Phase 1 v21
++
++## File baru
++
++- `engine/intel/__init__.py`
++- `engine/intel/common.py`
++- `engine/intel/data_quality.py`
++- `engine/intel/regime.py`
++- `engine/intel/mtf.py`
++- `engine/intel/liqmap.py`
++- `engine/intel/fvg_quality.py`
++- `engine/intel/confidence.py`
++- `engine/intel/pipeline.py`
++- `engine/intel/store.py`
++- `tests/test_phase1_intel.py`
++- `PHASE1_MARKET_INTELLIGENCE.md`
++- `VERIFICATION_PHASE1.md`
++- `PHASE1_v21.patch`
++- `MANIFEST_PHASE1.md`
++
++## File yang direvisi
++
++- `engine/resample.py` — metadata coverage/complete untuk candle hasil resample.
++- `engine/config.py` — `INTEL_ENABLED`, `INTEL_MODE`, history limit, regime lookback.
++- `engine/main.py` — orkestrasi, persistence, state, Telegram, fault isolation.
++- `engine/journal.py` — immutable intel snapshot hanya untuk record live baru.
++- `docs/index.html` — container panel dan versi v21.
++- `docs/app.js` — panel Market Intelligence lengkap.
++- `docs/style.css` — layout responsif panel intel.
++- `.github/workflows/engine.yml` — variable live/kill-switch dan build marker v21.
++
++## File existing yang dipertahankan
++
++Seluruh file program lain dari source terlampir ikut ada di ZIP agar paket dapat langsung mengganti repository. Tidak ada credential produksi di paket.
++
++## Cara commit
++
++1. Ekstrak ZIP.
++2. Salin isi folder ke root repository (pertahankan struktur folder).
++3. Pastikan GitHub variable `INTEL_ENABLED` kosong/`true` dan `INTEL_MODE` kosong/`live`.
++4. Commit dan jalankan workflow manual sekali.
++5. Cek panel Market Intelligence, `_site/data/intel_{SYMBOL}.json`, status Telegram, dan journal record live berikutnya.
++6. Jika ada masalah, set `INTEL_ENABLED=false`; legacy decision engine tetap berjalan.
+diff -ruN original_repo/PHASE1_MARKET_INTELLIGENCE.md repo/PHASE1_MARKET_INTELLIGENCE.md
+--- original_repo/PHASE1_MARKET_INTELLIGENCE.md	1970-01-01 00:00:00.000000000 +0000
++++ repo/PHASE1_MARKET_INTELLIGENCE.md	2026-11-12 09:06:31.997179383 +0000
+@@ -0,0 +1,212 @@
++# Phase 1 Market Intelligence v21 — mode LIVE, non-blocking
++
++Paket ini menambahkan langkah 0–6 di atas canonical SMC engine v20. Ia **tidak mengganti definisi BOS/CHoCH, FVG, OB, signal, outcome, atau journal lama**. `INTEL_MODE=live` berarti konteks tampil di dashboard, ditambahkan ke notifikasi Telegram, dan disimpan bersama record live baru. Ia tidak membuang sinyal.
++
++> **Peringatan metodologis:** seluruh angka adalah *context score* deterministik, bukan probabilitas menang. Bobot adalah baseline yang dapat diaudit dan harus dikalibrasi dari journal live/out-of-sample; bukan hasil optimasi palsu pada data simulasi.
++
++## Arsitektur
++
++```text
++closed OHLC + canonical smc.model()
++  ├─ Step 0 data_quality.py + metadata resample
++  ├─ Step 1 regime.py
++  ├─ Step 2 mtf.py
++  ├─ Step 3 liqmap.py
++  ├─ Step 4 fvg_quality.py
++  └─ Step 5 confidence.py
++         ↓
++  Step 6 state.json + intel_{SYMBOL}.json + dashboard + Telegram + journal snapshot
++```
++
++Semua modul dipanggil dari `main.Engine.analyze()` sesudah analisis v20 selesai. Exception pada intelligence ditangkap per pair; engine lama tetap berjalan.
++
++## Step 0 — Candle/resample integrity
++
++`resample.py` sekarang menambahkan:
++
++- `n`: jumlah unit candle sumber yang benar-benar membentuk bucket;
++- `expected_n`: unit yang seharusnya ada;
++- `coverage`: `min(1, n / expected_n)`;
++- `complete`: `coverage == 1`;
++- `source_step`: median jarak waktu candle sumber.
++
++Unit `n` tetap konsisten saat H1 bootstrap (`n=12`) diubah menjadi H4 (`expected_n=48`). Forex W memakai lima hari perdagangan. Holiday/provider gap tetap terlihat sebagai coverage rendah dan tidak diisi dengan OHLC sintetis.
++
++`intel/data_quality.py` memantau source gap, duplicate timestamp, usia candle, dan incomplete resample. Pada Phase 1, defect memberi penalty confidence tetapi **tidak menghapus candle dan tidak memblokir signal**.
++
++Arti status:
++
++- `HEALTHY` ≥ 90;
++- `DEGRADED` 70–89.9;
++- `POOR` < 70.
++
++## Step 1 — Market Regime
++
++Regime dipisahkan menjadi **arah** dan **fase**, bukan ditentukan satu indikator:
++
++1. arah swing/internal structure dari canonical SMC;
++2. Kaufman-style efficiency ratio:
++   `abs(close[t] - close[t-n]) / sum(abs(close[i] - close[i-1]))`;
++3. percentile ATR pada history sampai 120 bar;
++4. ATR sekarang / median ATR history;
++5. average true range 8 bar / baseline sebelumnya;
++6. recent CHoCH, opposing structure, dan displacement.
++
++Klasifikasi:
++
++| State | Arti operasional |
++|---|---|
++| `BULLISH_TREND` / `BEARISH_TREND` | Struktur searah dan perjalanan harga cukup efisien. |
++| `BULLISH_EXPANSION` / `BEARISH_EXPANSION` | Trend searah disertai pelebaran range/volatilitas. |
++| `RANGE` | Efisiensi directional lemah; jangan mengejar breakout tanpa konfirmasi. |
++| `COMPRESSION` | ATR percentile, range ratio, dan efficiency rendah; breakout belum dikonfirmasi. |
++| `TRANSITION` | Recent CHoCH atau swing/internal conflict; arah belum stabil. |
++| `INSUFFICIENT_DATA` | Tidak cukup bar untuk klasifikasi yang layak. |
++
++ATR dipakai sebagai ukuran volatilitas, bukan arah. Ini mengikuti karakter ATR: expanding ATR berarti range membesar, sedangkan low ATR terkait quiet/sideways periods. Threshold regime adalah baseline yang ditampilkan bersama metrik mentah agar bisa direvisi.
++
++## Step 2 — MTF Structure
++
++Bobot awal:
++
++| TF | Bobot |
++|---|---:|
++| D | 35 |
++| H4 | 30 |
++| H1 | 20 |
++| M15 | 15 |
++
++Conviction per TF berasal dari kondisi struktur:
++
++- swing = internal: 1.00;
++- swing saja: 0.78;
++- swing berlawanan internal (pullback/conflict): 0.58;
++- internal saja: 0.45;
++- netral: 0.20.
++
++Regime conflict mengurangi conviction 25%. Output menampilkan bull score, bear score, alignment, TF conflict, dan state tiap TF.
++
++Hierarchy:
++
++- XAUUSD: `H4 → H1 → M15`; D otomatis ditambahkan hanya setelah `config.min_bars("D")` tercapai.
++- Crypto: meminta `D → H4 → H1 → M15`; TF yang belum cukup ditandai, tidak dipaksakan.
++
++## Step 3 — Liquidity Map
++
++Level yang dihitung:
++
++- PDH/PDL;
++- PWH/PWL;
++- Asia 00:00–08:00 UTC;
++- London 08:00–16:00 `Europe/London` (DST-aware);
++- New York 08:00–17:00 `America/New_York` (DST-aware);
++- active EQH/EQL dan swing pool dari canonical SMC.
++
++Lifecycle level:
++
++- `INTACT`: belum ada wick/close melewati level setelah periode selesai;
++- `SWEPT`: wick melewati level lalu close kembali;
++- `BROKEN`: candle close melewati level.
++
++**Batasan penting:** ini adalah *OHLC-derived price-level proxy*. Ia tidak membuktikan ada resting orders. Likuiditas eksekusi sesungguhnya memerlukan limit-order-book (bid/ask, depth, spread, size). Karena itu dashboard menulis caveat tersebut secara eksplisit.
++
++## Step 4 — FVG Quality (0–100)
++
++Hanya FVG aktif dari canonical `smc.model()` yang dinilai.
++
++| Faktor | Maks | Definisi ringkas |
++|---|---:|---|
++| MTF alignment | 20 | directional score hierarchy untuk arah FVG |
++| Liquidity sweep | 15 | sweep searah ≤12 candle sebelum FVG |
++| Displacement | 20 | body/ATR + body/range candle impuls |
++| Regime compatibility | 15 | cocok/tidak dengan arah dan fase regime |
++| Freshness | 10 | umur + persentase mitigasi wick |
++| Active-leg location | 10 | posisi midpoint FVG pada leg BOS/CHoCH aktif |
++| Formation session | 5 | konteks waktu; bukan Session Intelligence statistik |
++| Data integrity | 5 | data-health score |
++
++Grade: A+ ≥90, A ≥80, B ≥70, C ≥60, D <60. FVG lama/termitigasi tidak hilang secara diam-diam; freshness score turun dan alasan ditampilkan.
++
++Perbaikan utama dibanding premium/discount lama: lokasi FVG dihitung terhadap **leg struktur aktif yang menghasilkan BOS/CHoCH**, bukan sekadar swing high dan swing low terakhir yang mungkin tidak satu leg.
++
++## Step 5 — Transparent Confidence
++
++Satu skor menggantikan kebutuhan membuat skor kelima yang tidak dapat dijelaskan.
++
++| Komponen | Maks |
++|---|---:|
++| Market regime | 20 |
++| MTF structure | 25 |
++| Liquidity context | 15 |
++| Best aligned FVG | 25 |
++| Active-leg location | 10 |
++| Data integrity | 5 |
++
++Penalty terpisah dan terlihat: TF conflict, transition, compression, no active FVG, dan poor data. Engine menghitung sisi bull dan bear; jika spread <8, action menjadi `MIXED_WATCH`. Output action: `BUY_WATCH`, `SELL_WATCH`, `MIXED_WATCH`, atau `NO_EDGE`.
++
++Label HIGH/GOOD/MODERATE/LOW **bukan** persentase peluang menang. Tidak ada threshold yang menolak signal pada Phase 1.
++
++## Step 6 — Live integration
++
++### Dashboard
++
++Panel **Market Intelligence** menampilkan:
++
++- regime + kekuatan dan alasan;
++- MTF bias/alignment/conflict;
++- transparent confidence breakdown + penalties;
++- FVG terbaik dan rincian seluruh faktor;
++- hierarchy table;
++- liquidity map + lifecycle;
++- data-health dan glossary arti state.
++
++### Telegram
++
++Notifikasi monitor/signal yang memang sudah akan dikirim mendapat suffix: regime, MTF alignment, best FVG, dan context score. Phase 1 tidak membuat spam notification baru setiap lima menit.
++
++### Journal
++
++Record `src=live` baru mendapat immutable `intel` snapshot. Record replay tidak ditempeli konteks hari ini; historical intelligence hanya boleh dibuat melalui candle-by-candle replay agar tidak look-ahead/mislabel.
++
++### Persistence
++
++- `store/intel/{SYMBOL}.json`: latest full snapshot + bounded compact history;
++- `_site/data/intel_{SYMBOL}.json`: salinan publik untuk audit;
++- `state.json → pairs[SYMBOL].intel`: snapshot dashboard.
++
++## Konfigurasi
++
++```text
++INTEL_ENABLED=true       # kill switch
++INTEL_MODE=live          # live | shadow
++INTEL_HISTORY_LIMIT=5000
++INTEL_REGIME_LOOKBACK=20
++```
++
++- `live`: dashboard + Telegram + journal;
++- `shadow`: dashboard/persistence tetap ada, tetapi suffix Telegram dimatikan;
++- `INTEL_ENABLED=false`: modul tidak dipanggil dan legacy decisions/journal kembali seperti v20.
++
++`gate` sengaja tidak disediakan pada paket ini agar threshold yang belum dikalibrasi tidak dapat memblokir setup.
++
++## Validasi paket
++
++Dilakukan pada source terlampir:
++
++1. Python compile seluruh engine;
++2. `node --check docs/app.js`;
++3. workflow YAML parse;
++4. lima unit test untuk resample, hierarchy, regime, dan non-blocking confidence;
++5. offline simulation XAUUSD + BTCUSDT;
++6. semantic regression: legacy `overall`, per-TF signal, counts, dan journal identik setelah field intel diabaikan;
++7. simulation `INTEL_ENABLED=false`: legacy decisions dan journal identik dengan baseline.
++
++Simulasi membuktikan integrasi/runtime, **bukan** profitability atau optimalitas bobot. Tahap berikutnya adalah observasi live, lalu evaluasi per score bucket terhadap expectancy/out-of-sample.
++
++## Referensi desain
++
++- pandas `DataFrame.resample` menjelaskan kontrol bucket/label/closed untuk time-series aggregation: https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.resample.html
++- Fidelity, *Average True Range*: ATR mengukur volatilitas dan memasukkan gap; expanding ATR berarti range membesar dan ATR tidak directional: https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/atr
++- QuantConnect, *Kaufman Efficiency Ratio*: referensi indikator untuk rasio efisiensi arah/path: https://www.quantconnect.com/docs/v2/writing-algorithms/indicators/supported-indicators/kaufman-efficiency-ratio
++- CME Group, *Liquidity Tool Methodology*: liquidity order-book dibangun dari bid/ask orders, quantities, depth, spread, dan cost-to-trade. Ini alasan liquidity map OHLC diberi label proxy, bukan order-book liquidity: https://www.cmegroup.com/education/articles-and-reports/understanding-the-cme-liquidity-tool-methodology
++- OANDA, *Hours of operation*: sesi forex global dan perubahan DST mendukung penggunaan timezone-aware New York/London: https://www.oanda.com/bvi-en/cfds/hours-of-operation/
+diff -ruN original_repo/SHA256SUMS.txt repo/SHA256SUMS.txt
+--- original_repo/SHA256SUMS.txt	1970-01-01 00:00:00.000000000 +0000
++++ repo/SHA256SUMS.txt	2026-11-12 09:10:23.171341517 +0000
+@@ -0,0 +1,50 @@
++68aea2c785d1fcb74b72a23d8da034888dbaaa8a3e068448cfd1752a2874f04e  ./.github/workflows/engine.yml
++7b7dbc73ef1e5641a30cf0e69884d1c30fdef499a102f21ea1e591689702e4ab  ./.github/workflows/keepalive.yml
++82950e82e45125bce609b155812a8ddad51169398033d872892cdd69f7684ab4  ./.github/workflows/test.yml
++77a728bca40d29b0cbf076e916a7c86d751da02fa151d2a6ae2bde3f346fe887  ./.gitignore
++18c35a476358abaa8d89208948f095261c438fbc2bf547b978e9b777ba928b33  ./MANIFEST_PHASE1.md
++1fc41f6cfd9c41d53022af603ddeee06ed542502a3a8c6153ec8158182f52087  ./PHASE1_MARKET_INTELLIGENCE.md
++88d0f9b1e11a4a332d05d03edb0a12d0a366265781d91022419f6ed6d9d9b05d  ./PHASE1_v21.patch
++be2fdd2087772467c88504fa970f90e167e8fc911ea90eff81be0c7d7d946ed6  ./VERIFICATION_PHASE1.md
++2ea0b53f78b7c0661c6d37bbac856e899af3acfca0476c77625b57406acaec16  ./docs/app.js
++74565f52fc9a414d5242b0f19a14f0bee2667924e7e84fb6d08a91a67513014c  ./docs/footprint.html
++830a10b065019043d3d79245613b178c9e8e21b69bb850f8e1bb2b118d0de4b2  ./docs/index.html
++a65e05c7b53abf9502b22137cbc9bf7453c78f6c75bf947e8a272bf662209535  ./docs/style.css
++74a6cea03ede84e6c8485b0bbdbcb9abe53f97abe98f2e1b5518db9a83aee84e  ./engine/XAUUSD_H1.json
++fc7f2472f9e741b05a1a452cd26e4be1a70fff81b66a6994d688ccb0d0945971  ./engine/XAUUSD_M15.json
++c61b4bc794ddb4eeac215a16bd5a67b067409b9e87b13c54430c64fa2933bc33  ./engine/XAUUSD_M5.json
++4d69393919686d03d81119dcf04252d852e7bfc17c654b250a1abea176071b95  ./engine/analysis.py
++1fbf4f802d0811ea6acfec9ce12f227e592d2ff63c7ea57ed5f9232f6d57bdb4  ./engine/backfill.py
++c26f169a0328b3dc6746c4b68fe85b12e0cefeb3dbc68891e3dd4fc7937f31fc  ./engine/binance.py
++8b9a1075225052f8d23323cba864bdfdfb6d842a9fbec1294bd871b1fbdb2c2d  ./engine/charts.py
++5eb06d57cd8c1c572e49a110da9ac0ed7ff6ea5e039ad0352bc545c8f5347726  ./engine/config.py
++c95d0228c5cc44511ad7bea96be6fa01d7dfde7ff7e1b5f89c4fca112a3f15f1  ./engine/data_source.py
++8dc10629fe8bc318eb53fce41359320b20dd248b53c70318204c0adc91cd0563  ./engine/fibo.py
++6d77d4b27704dedc48fb4574726948a734df6fa0f5ac6e72b4614e6347e0bb53  ./engine/indicators.py
++a6511009246f872748f083c4ea2ba4e97bb61bc1288bca429d7604d090091bea  ./engine/intel/__init__.py
++c6979a42d9e9948da577f70501f54308492658d8b006ff4264b5a67c36abc541  ./engine/intel/common.py
++21608edc01a47ae1815336fcfdfe3621ffe389d98fcc3d89ac559bfb3e23feb5  ./engine/intel/confidence.py
++7a799a734f50ab7280cb5714ee67ceca175d7914f9558bb200fff17d809abf42  ./engine/intel/data_quality.py
++462294758941e2e4bab857cac6c3d98fa4ecc15837db473ed3b3b1110cd35859  ./engine/intel/fvg_quality.py
++f4d0630e9bb2e8ec19e3209da785471c8ef154db3655b6d8d74c635362acedec  ./engine/intel/liqmap.py
++f3129b551eeed3ceccb8110a6de210c63b7d09dc573772daef0a2e8e1a719bbb  ./engine/intel/mtf.py
++3215f112394a911d7e3ea1c58fd61ec912f9cca8bb2491562c0afdd4e8a7b0bc  ./engine/intel/pipeline.py
++fdba16476294dbc6685796d4c596c74a4c12e5ae01d9f6541bd44881c9ea8e2b  ./engine/intel/regime.py
++811bdfa4e1f328b7cc8cbedbfb067800f66f14c3a8c6fec509960be4abc84b0a  ./engine/intel/store.py
++7ad0d99dd34e3d48b2f20c4cdbcf9e5b97dc33d39c11020200f05116ea325743  ./engine/journal.py
++0780e40eaab945c8693b38741cd708293031abaffbf77b2d1f303eb7ffcc30f2  ./engine/lazy_patch.py
++2ab727941de60f49331ab73f12e5ba3571b201492e974dadbd9f19143235fe58  ./engine/main.py
++457bb4f58c982a49fe98a4049d7dca9d65fcb1237ca9104f738d8056c257fdd4  ./engine/messages.py
++2fb92ea9f065af1bf702ed32ccb341e178b91e0239cdafac70876ebf6fdac68a  ./engine/monitor.py
++a965f1b124eabdf71614f8a46c9e961efa930d3d875f924e4778dfa6ec790cdc  ./engine/orderflow.py
++b885c2438486db8c8b7e9ad2b7f2018e2f48a7aa2d2499f35778c648b8feba7b  ./engine/requirements.txt
++1d64bc38c98cd1556ffb9470595e86003eed962bbc2a16d7a8daada1cd00cfc1  ./engine/resample.py
++a40814ccf81bea7be800673514dd40580b90f266c97fb36cd5a3a3cbd46c2016  ./engine/session.py
++69c5d1d60517ea1d9a8a7f9d77693964ca818a2dc62b295cf1359e533ab4e851  ./engine/simulate.py
++b8a7c0bc1003a84615bc5586bf1c315a8452b78a5a7fe8635fe62d2ef2577878  ./engine/smc.py
++be70c79bfbf9c1248ac3b9c8710bf5a3910c9aaa9fd0f6d6cf794abc13f4fd1b  ./engine/telegram_notify.py
++f0e0a6816779e9862cde5c467aaeee26586cf62e3bb2822c2473034effc9c55f  ./engine/test_connection.py
++6107d5237acb524ac5df799edfc4f6e5eccbdf159001e58d7910486f1767324f  ./engine/zones.py
++54bb2b0a3fd33bfea245420afbe7b12ad6deb3726c7567653271c349b7c9d195  ./requirements.txt
++a1ccd19cf6578b715ffa217918a173ec763fad44a7405f62fdd9b3c573d5992e  ./tests/test_phase1_intel.py
++921931cd7501f6e9068ab83c4a64ecf6ada15182b54c67aea16fe2c24c122272  ./worker/worker.js
+diff -ruN original_repo/VERIFICATION_PHASE1.md repo/VERIFICATION_PHASE1.md
+--- original_repo/VERIFICATION_PHASE1.md	1970-01-01 00:00:00.000000000 +0000
++++ repo/VERIFICATION_PHASE1.md	2026-11-12 09:09:57.982330095 +0000
+@@ -0,0 +1,33 @@
++# Verification report — Phase 1 v21
++
++Tanggal build: 2026-11-12
++
++## Hasil
++
++- Python compile: **PASS**
++- Dashboard JavaScript syntax (`node --check`): **PASS**
++- GitHub Actions YAML parse: **PASS**
++- Unit tests: **5/5 PASS**
++- Unified patch (`git apply --check`): **PASS**
++- Offline integration simulation: **PASS**, dua run berurutan, XAUUSD + BTCUSDT
++- JSON strict serialization (`allow_nan=False`): **PASS**
++- Snapshot persistence: **PASS**, history bertambah satu record per run
++- Kill switch `INTEL_ENABLED=false`: **PASS**
++- Semantic regression: legacy overall decision, per-TF signal, candle counts, dan journal (setelah field intel diabaikan) identik dengan baseline: **PASS**
++
++## Snapshot simulation terakhir
++
++| Pair | Top TF | Regime | Confidence | Data health |
++|---|---|---|---:|---:|
++| XAUUSD | H4 | RANGE | 53.5 | 98.7 |
++| BTCUSDT | H4* | BULLISH_TREND | 76.8 | 99.2 |
++
++`*` Dataset simulasi hanya 36 D candle sehingga D belum memenuhi minimum; fallback H4 adalah perilaku yang disengaja. Feed Binance produksi dengan D cukup memakai D → H4 → H1 → M15.
++
++Angka simulasi hanya membuktikan jalur kode dan schema; tidak membuktikan edge/profitability atau optimalitas threshold.
++
++## Batas pengujian
++
++- Tidak ada panggilan RealMarketAPI/Binance/Telegram produksi; semuanya di-mock oleh `simulate.py`.
++- Kerapian visual divalidasi melalui syntax/schema/responsive CSS, belum melalui screenshot browser produksi.
++- Bobot perlu dinilai setelah journal live cukup, memakai expectancy per score bucket dan out-of-sample review.
+diff -ruN original_repo/docs/app.js repo/docs/app.js
+--- original_repo/docs/app.js	2026-11-12 09:09:23.175251387 +0000
++++ repo/docs/app.js	2026-11-12 09:02:13.295935638 +0000
+@@ -1,4 +1,5 @@
+-/* Market Monitor v20 – + HTF POI (FVG/OB H4 -> CHoCH M15 -> BOS M15) di panel Monitoring Events & chart.
++/* Market Monitor v21 – Phase 1 Market Intelligence LIVE, explainable, non-blocking.
++   Market Monitor v20 – + HTF POI (FVG/OB H4 -> CHoCH M15 -> BOS M15) di panel Monitoring Events & chart.
+    Market Monitor v19 – Auto Fibonacci (H4 utama tebal + Fib lokal tipis per TF), MODE MONITORING
+    (sinyal BUY/SELL disembunyikan, panel Monitoring Events dari monitor_{PAIR}.json), preset tampilan Minimal,
+    status Telegram per pesan (SENT / RETRYING / FAILED) + catatan run engine.
+@@ -876,6 +877,43 @@
+       <span>Zona 50–61.8</span><b class="g">${fx(fb.gold[0], d)} – ${fx(fb.gold[1], d)}</b><span>Retrace</span><b>${fb.retrace ?? "-"}% <span class="muted">${esc(fb.zone || "")}</span></b></div>
+       <div class="muted">Anchor dari ${esc(fb.event.label)} ${wib(fb.event.t, "full")} · ${bull ? "100% = swing low → 0% = swing high" : "100% = swing high → 0% = swing low"}</div></div>`;
+   }
++
++  // ======================= v21: PHASE 1 MARKET INTELLIGENCE =======================
++  const scoreTone = (n) => n >= 80 ? "up" : n >= 60 ? "yl" : n < 40 ? "dn" : "";
++  const dirText = (d) => d === "bull" ? "▲ Bullish" : d === "bear" ? "▼ Bearish" : "◌ Netral/Mixed";
++  function intelPanel() {
++    const el = $("p-intel"); if (!el || !S.state) return;
++    const p = P(), I = p && p.intel, cfg = S.state.intel || {};
++    if (!cfg.enabled) {
++      el.innerHTML = `<h3>Market Intelligence</h3><p class="muted">INTEL_ENABLED=False — kill switch aktif; engine v20 tetap berjalan.</p>`;
++      return;
++    }
++    if (!I || I.error) {
++      el.innerHTML = `<h3>Market Intelligence · ${esc((cfg.mode || "live").toUpperCase())}</h3><div class="warn err">Intel belum tersedia${I && I.error ? ": " + esc(I.error) : " (menunggu run engine)."} Legacy signal tidak diblokir.</div>`;
++      return;
++    }
++    const r = I.regime || {}, m = I.mtf || {}, q = I.data_quality || {}, c = I.confidence || {};
++    const fqg = I.fvg_quality || {}, best = fqg.best, liq = I.liquidity || {}, d = p.digits;
++    const comp = (c.components || []).map((x) => `<div class="intel-factor"><div><b>${esc(x.name)}</b><span>${x.score}/${x.max}</span></div><div class="ibar"><i style="width:${Math.max(0, Math.min(100, 100 * x.score / (x.max || 1)))}%"></i></div><small>${esc(x.reason)}</small></div>`).join("");
++    const penalties = (c.penalties || []).map((x) => `<li><b>${x.value}</b> ${esc(x.name)} — ${esc(x.reason)}</li>`).join("");
++    const mtfRows = (m.states || []).map((x) => `<tr><td><b>${esc(x.tf)}</b></td><td class="${cls(x.direction)}">${esc(x.available ? dirText(x.direction) : "Data kurang")}</td><td>${Math.round((x.conviction || 0) * 100)}%</td><td>${esc(x.structure || "-")}</td><td>${esc(x.regime || "-")}</td></tr>`).join("");
++    const levels = (liq.levels || []).filter((x) => ["PDH", "PDL", "PWH", "PWL", "ASIA_HIGH", "ASIA_LOW", "LONDON_HIGH", "LONDON_LOW", "NEW_YORK_HIGH", "NEW_YORK_LOW"].includes(x.type)).slice(0, 12);
++    const liqRows = levels.map((x) => `<tr><td><b>${esc(x.type)}</b></td><td>${fx(x.price, d)}</td><td><span class="liq-st ${esc(x.status)}">${esc(x.status)}</span></td><td>${x.distance_atr == null ? "-" : x.distance_atr + " ATR"}</td><td class="muted">${esc(x.description || "")}</td></tr>`).join("");
++    const fvgFactors = best ? best.factors.map((x) => `<li><b>${x.score}/${x.max}</b> ${esc(x.name)} — ${esc(x.reason)}</li>`).join("") : "";
++    const glossary = I.glossary || {};
++    el.innerHTML = `<div class="intel-head"><div><h3>Market Intelligence · ${esc((I.mode || "live").toUpperCase())}</h3><div class="muted">${esc(I.notice || "")}</div></div><span class="intel-live">LIVE · NON-BLOCKING</span></div>
++      <div class="intel-grid">
++        <article class="intel-card"><small>Market Regime · ${esc(I.top_tf)}</small><strong class="${cls(r.direction)}">${esc((r.label || "-").replaceAll("_", " "))}</strong><div class="score ${scoreTone(r.strength || 0)}">${r.strength ?? 0}<em>/100</em></div><p>${esc(r.description || "")}</p><ul>${(r.reasons || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul></article>
++        <article class="intel-card"><small>MTF Structure</small><strong class="${cls(m.bias)}">${esc(dirText(m.bias))}</strong><div class="score ${scoreTone(m.alignment || 0)}">${m.alignment ?? 0}<em>/100</em></div><p>${esc(m.description || "")}</p><p class="muted">Status ${esc(m.label || "-")} · bull ${m.bull_score ?? 0} · bear ${m.bear_score ?? 0}${(m.conflicts || []).length ? " · konflik " + esc(m.conflicts.join(", ")) : ""}</p></article>
++        <article class="intel-card confidence"><small>Transparent Confidence</small><strong class="${cls(c.direction)}">${esc(c.action || "-")}</strong><div class="score ${scoreTone(c.score || 0)}">${c.score ?? 0}<em>/100</em></div><p>${esc(c.description || "")}</p><p class="muted">Bull ${c.bull ?? 0} · Bear ${c.bear ?? 0} · spread ${c.spread ?? 0}</p></article>
++        <article class="intel-card"><small>Data Health</small><strong class="${q.status === "HEALTHY" ? "up" : q.status === "POOR" ? "dn" : "yl"}">${esc(q.status || "-")}</strong><div class="score ${scoreTone(q.score || 0)}">${q.score ?? 0}<em>/100</em></div><p>${esc(q.description || "")}</p><p class="muted">Gap ${q.gap_count || 0} · missing ${q.missing_source_bars || 0} · duplicate ${q.duplicates || 0} · resample incomplete ${q.resample_incomplete || 0}/${q.resample_measured || 0}</p></article>
++      </div>
++      <div class="intel-cols"><div><h4>Confidence breakdown</h4>${comp || `<p class="muted">Belum ada komponen.</p>`}${penalties ? `<h4>Penalties</h4><ul class="intel-list penalty">${penalties}</ul>` : ""}</div>
++      <div><h4>FVG terbaik</h4>${best ? `<div class="fvg-best"><b class="${cls(best.direction)}">${esc(best.tf)} ${esc(dirText(best.direction))} · Grade ${esc(best.grade)} · ${best.score}/100</b><span>${fx(best.bottom, d)} – ${fx(best.top, d)} · umur ${best.age_bars} candle · mitigasi ${best.mitigation_pct}%</span></div><ul class="intel-list">${fvgFactors}</ul><p class="muted">${esc(best.description || "")}</p>` : `<p class="muted">Tidak ada FVG aktif pada hierarchy yang siap.</p>`}</div></div>
++      <h4>Hierarchy</h4><div class="tbl-wrap"><table class="tbl intel-table"><thead><tr><th>TF</th><th>Arah</th><th>Conviction</th><th>State</th><th>Regime</th></tr></thead><tbody>${mtfRows}</tbody></table></div>
++      <h4>Liquidity Map <span class="muted">— price-level proxy, bukan resting order book</span></h4><div class="tbl-wrap"><table class="tbl intel-table"><thead><tr><th>Level</th><th>Harga</th><th>Status</th><th>Jarak</th><th>Arti</th></tr></thead><tbody>${liqRows || `<tr><td colspan="5" class="muted">Level periode/sesi belum cukup.</td></tr>`}</tbody></table></div>
++      <details class="intel-help"><summary>Arti state/regime</summary><div>${Object.entries(glossary).map(([k, v]) => `<p><b>${esc(k.replaceAll("_", " "))}</b> — ${esc(v)}</p>`).join("")}</div></details>`;
++  }
+   function panels() {
+     const st = S.state, p = P(), d = p.digits, ov = p.overall, s = ov.setup;
+     document.body.classList.toggle("forex", p.market !== "crypto");
+@@ -904,6 +942,7 @@
+         ${MONITOR() ? "" : zoneList(a.zones, d)}`;
+     }
+     flowPanel();
++    intelPanel();
+     statusInto($("p-status"));
+     eventsPanel();
+     historyPanel();
+@@ -1094,7 +1133,7 @@
+   // state.json dicek tiap 45 detik (cache dilewati). Chart & panel hanya diperbarui bila
+   // updated_ts berubah -> hemat & posisi zoom/geser chart tetap. Tab tersembunyi = jeda.
+   // v10-lazy compatibility marker is kept for the existing GitHub Actions check.
+-  const APP_VERSION = "v20-htf-poi";
++  const APP_VERSION = "v21-phase1-intelligence";
+   const POLL_MS = 45 * 1000;
+   let lastTs = 0, polling = false;
+   async function load(force) {
+diff -ruN original_repo/docs/index.html repo/docs/index.html
+--- original_repo/docs/index.html	2026-11-12 09:09:23.176251388 +0000
++++ repo/docs/index.html	2026-11-12 09:01:43.780974806 +0000
+@@ -7,7 +7,7 @@
+ <meta name="robots" content="noindex,nofollow">
+ <meta http-equiv="Cache-Control" content="no-cache">
+ <title>Market Monitor – XAUUSD & Crypto SMC</title>
+-<link rel="stylesheet" href="style.css?v=20">
++<link rel="stylesheet" href="style.css?v=21">
+ </head>
+ <body>
+ <header class="tv-top">
+@@ -80,6 +80,8 @@
+   <div class="panel" id="p-flow"></div>
+ </section>
+ 
++<section class="panel wide intel-panel" id="p-intel" aria-live="polite"></section>
++
+ <section class="panel wide">
+   <h3 id="mtf-title">Multi-Timeframe</h3>
+   <div class="tbl-wrap">
+@@ -92,8 +94,8 @@
+ <section class="panel wide" id="p-events"></section>
+ <section class="panel wide" id="p-history"></section>
+ <section class="panel wide" id="p-status"></section>
+-<p class="foot">v20 · HTF POI (FVG/OB H4 → CHoCH M15 → BOS) · Mode monitoring: sinyal BUY/SELL nonaktif, engine mencatat kejadian/setup + Auto Fibonacci (H4 utama, Fib lokal per TF) · XAUUSD: RealMarketAPI M5 tiap 5 menit (07–12 New York) / 10 menit (di luar sesi), otomatis diperlambat bila kuota menipis · Crypto top 10: Binance M1 tiap 5 menit + live WebSocket di browser · Riwayat sinyal tidak pernah dihapus · Bukan nasihat keuangan.</p>
+-<script src="app.js?v=20"></script>
++<p class="foot">v21 · Phase 1 Market Intelligence LIVE (data integrity, regime, MTF, liquidity map, FVG quality, transparent confidence) · Context score bukan probabilitas dan tidak memblokir sinyal · HTF POI + Auto Fibonacci tetap aktif · Riwayat sinyal tidak pernah dihapus · Bukan nasihat keuangan.</p>
++<script src="app.js?v=21"></script>
+   <!-- Tombol ke halaman Footprint -->
+ <a href="footprint.html" id="fpLink"
+    style="position:fixed;right:14px;bottom:18px;z-index:9999;
+diff -ruN original_repo/docs/style.css repo/docs/style.css
+--- original_repo/docs/style.css	2026-11-12 09:09:23.177251388 +0000
++++ repo/docs/style.css	2026-11-12 09:02:23.288971787 +0000
+@@ -148,3 +148,24 @@
+ .nf{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10.5px;font-weight:700;color:#fff;background:#9aa0ac}
+ .nf.SENT{background:var(--up)} .nf.FAILED{background:var(--dn)} .nf.RETRYING,.nf.QUEUED{background:var(--org)}
+ .nf.OFF,.nf.REPLAY{background:#c4c8d0;color:#333}
++
++
++/* ---- v21: Phase 1 Market Intelligence ---- */
++.intel-panel{border-top:3px solid var(--acc);background:linear-gradient(180deg,rgba(41,98,255,.035),transparent 180px)}
++.intel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
++.intel-live{font-size:10px;font-weight:800;letter-spacing:.08em;color:var(--up);border:1px solid var(--up);border-radius:999px;padding:3px 8px;white-space:nowrap}
++.intel-grid{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:8px}
++.intel-card{border:1px solid var(--line);background:var(--bg);border-radius:7px;padding:10px;min-width:0}
++.intel-card>small{display:block;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:700}
++.intel-card>strong{display:block;font-size:15px;margin:4px 0;text-transform:uppercase}
++.intel-card .score{font-size:27px;font-weight:800;line-height:1.1}.intel-card .score em{font-style:normal;font-size:12px;color:var(--muted);margin-left:2px}
++.intel-card p{margin:5px 0}.intel-card ul{margin:5px 0 0;padding-left:17px;color:var(--muted);font-size:11.5px}
++.intel-cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:10px}
++.intel-factor{margin:7px 0}.intel-factor>div:first-child{display:flex;justify-content:space-between;gap:8px;font-size:12px}.intel-factor small{display:block;color:var(--muted);margin-top:2px}
++.ibar{height:5px;background:var(--panel);border-radius:5px;overflow:hidden}.ibar i{display:block;height:100%;background:var(--acc)}
++.intel-list{margin:5px 0;padding-left:18px;font-size:11.5px}.intel-list li{margin:3px 0}.intel-list.penalty b{color:var(--dn)}
++.fvg-best{display:flex;flex-direction:column;gap:3px;background:var(--panel);border-radius:5px;padding:7px 9px}
++.intel-table td:last-child{white-space:normal;min-width:220px}.liq-st{display:inline-block;border-radius:3px;padding:1px 6px;font-size:10.5px;font-weight:800;background:#dfe3eb}.liq-st.INTACT{color:#1565c0;background:#e3f2fd}.liq-st.SWEPT{color:#a45a00;background:#fff3e0}.liq-st.BROKEN{color:#b71c1c;background:#ffebee}
++.intel-help{margin-top:9px;border-top:1px dashed var(--line);padding-top:7px}.intel-help summary{cursor:pointer;font-weight:700}.intel-help p{margin:5px 0;font-size:12px}
++@media(max-width:1100px){.intel-grid{grid-template-columns:repeat(2,minmax(180px,1fr))}}
++@media(max-width:700px){.intel-grid,.intel-cols{grid-template-columns:1fr}.intel-head{flex-direction:column}.intel-live{align-self:flex-start}}
+diff -ruN original_repo/engine/config.py repo/engine/config.py
+--- original_repo/engine/config.py	2026-11-12 09:09:23.171251386 +0000
++++ repo/engine/config.py	2026-11-12 09:07:04.374170398 +0000
+@@ -77,7 +77,18 @@
+ STORE_LIMIT = {"M1": 4400, "M5": 6000, "M15": 4000, "H1": 4000, "H4": 3000, "D": 2000, "W": 1000}
+ CHART_BARS = dict(STORE_LIMIT)
+ JOURNAL_SETUP_LIMIT = int(_get("JOURNAL_SETUP_LIMIT", "3000"))   # per TF; entry tidak dibatasi
+-ENGINE_VERSION = "v20"
++ENGINE_VERSION = "v21-phase1-intelligence"
++
++# ---------- Phase 1 Market Intelligence (langkah 0-6) ----------
++# LIVE = tampil di dashboard, ikut pada notifikasi Telegram, dan snapshot disimpan di
++# journal/intel history. Lapisan ini OBSERVATIONAL: tidak pernah menerima/menolak sinyal v20.
++# INTEL_ENABLED adalah kill switch; False mengembalikan alur keputusan v20 tanpa revert kode.
++INTEL_ENABLED = _bool("INTEL_ENABLED", True)
++INTEL_MODE = _get("INTEL_MODE", "live").lower()
++if INTEL_MODE not in ("live", "shadow"):
++    INTEL_MODE = "live"
++INTEL_HISTORY_LIMIT = int(_get("INTEL_HISTORY_LIMIT", "5000"))
++INTEL_REGIME_LOOKBACK = int(_get("INTEL_REGIME_LOOKBACK", "20"))
+ 
+ # ---------- Strategi top-down ----------
+ BIAS_TF = _get("BIAS_TF", "H4")
+diff -ruN original_repo/engine/intel/__init__.py repo/engine/intel/__init__.py
+--- original_repo/engine/intel/__init__.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/__init__.py	2026-11-12 08:57:56.385809898 +0000
+@@ -0,0 +1,12 @@
++"""Phase 1 Market Intelligence.
++
++This package is deliberately read-only with respect to the legacy decision engine: it
++observes closed candles and existing SMC output, then emits explainable context.  In
++``live`` mode the context is published to the dashboard, Telegram and new journal
++records, but it never accepts/rejects a legacy signal.
++"""
++
++from .pipeline import build_intelligence, telegram_suffix
++from .store import SnapshotStore
++
++__all__ = ["build_intelligence", "telegram_suffix", "SnapshotStore"]
+diff -ruN original_repo/engine/intel/common.py repo/engine/intel/common.py
+--- original_repo/engine/intel/common.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/common.py	2026-11-12 08:58:12.791767798 +0000
+@@ -0,0 +1,119 @@
++"""Small dependency-free helpers shared by the intelligence modules."""
++from __future__ import annotations
++
++from datetime import datetime, timezone
++from math import isfinite
++from statistics import median
++from zoneinfo import ZoneInfo
++
++UTC = timezone.utc
++NY = ZoneInfo("America/New_York")
++LONDON = ZoneInfo("Europe/London")
++
++
++def clamp(value, lo=0.0, hi=100.0):
++    return max(lo, min(hi, value))
++
++
++def safe(value, default=0.0):
++    try:
++        value = float(value)
++        return value if isfinite(value) else default
++    except (TypeError, ValueError):
++        return default
++
++
++def percentile_rank(values, value):
++    """Inclusive empirical percentile in [0, 1]; no distributional assumption."""
++    clean = [safe(v, None) for v in values]
++    clean = [v for v in clean if v is not None]
++    if not clean:
++        return 0.5
++    return sum(v <= value for v in clean) / len(clean)
++
++
++def rolling_true_ranges(bars):
++    out = []
++    for i, bar in enumerate(bars):
++        prev = bars[i - 1]["c"] if i else bar["c"]
++        out.append(max(bar["h"] - bar["l"], abs(bar["h"] - prev), abs(bar["l"] - prev)))
++    return out
++
++
++def wilder(values, period=14):
++    """Wilder moving average with a running warm-up, matching the existing engine."""
++    out, acc = [], None
++    for i, value in enumerate(values):
++        if i + 1 < period:
++            out.append(sum(values[: i + 1]) / (i + 1))
++        elif i + 1 == period:
++            acc = sum(values[:period]) / period
++            out.append(acc)
++        else:
++            acc = (acc * (period - 1) + value) / period
++            out.append(acc)
++    return out
++
++
++def efficiency_ratio(closes, lookback=20):
++    """Kaufman-style directional efficiency: net travel / total path, [0, 1]."""
++    if len(closes) < 3:
++        return 0.0
++    n = min(lookback, len(closes) - 1)
++    window = closes[-(n + 1):]
++    path = sum(abs(window[i] - window[i - 1]) for i in range(1, len(window)))
++    return abs(window[-1] - window[0]) / path if path > 1e-12 else 0.0
++
++
++def robust_ratio(value, baseline):
++    return safe(value) / max(safe(baseline), 1e-12)
++
++
++def direction_label(direction):
++    return "Bullish" if direction == "bull" else "Bearish" if direction == "bear" else "Netral"
++
++
++def iso(ts):
++    return datetime.fromtimestamp(int(ts), UTC).isoformat().replace("+00:00", "Z")
++
++
++def price_session(ts):
++    """Human review label only; Phase 2 will own statistical session intelligence.
++
++    Sessions overlap by design.  The priority communicates the most active overlap
++    first and uses DST-aware London/New York local clocks.
++    """
++    dt = datetime.fromtimestamp(ts, UTC)
++    lh = dt.astimezone(LONDON).hour
++    nh = dt.astimezone(NY).hour
++    london = 8 <= lh < 16
++    new_york = 8 <= nh < 17
++    if london and new_york:
++        return "LONDON_NY_OVERLAP"
++    if new_york:
++        return "NEW_YORK"
++    if london:
++        return "LONDON"
++    if 0 <= dt.hour < 8:
++        return "ASIA"
++    return "OFF_SESSION"
++
++
++def compact_snapshot(intel):
++    """Immutable journal-safe subset; intentionally excludes large level arrays."""
++    if not intel:
++        return None
++    conf = intel.get("confidence") or {}
++    reg = intel.get("regime") or {}
++    mtf = intel.get("mtf") or {}
++    fvg = intel.get("fvg_quality") or {}
++    data = intel.get("data_quality") or {}
++    return {
++        "version": intel.get("version"), "mode": intel.get("mode"), "asof": intel.get("asof"),
++        "regime": reg.get("label"), "regime_score": reg.get("strength"),
++        "mtf_bias": mtf.get("bias"), "mtf_alignment": mtf.get("alignment"),
++        "confidence_direction": conf.get("direction"), "confidence_score": conf.get("score"),
++        "confidence_label": conf.get("label"), "confidence_components": conf.get("components"),
++        "fvg_id": (fvg.get("best") or {}).get("id"), "fvg_grade": (fvg.get("best") or {}).get("grade"),
++        "fvg_score": (fvg.get("best") or {}).get("score"), "data_score": data.get("score"),
++    }
+diff -ruN original_repo/engine/intel/confidence.py repo/engine/intel/confidence.py
+--- original_repo/engine/intel/confidence.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/confidence.py	2026-11-12 09:00:21.872916393 +0000
+@@ -0,0 +1,100 @@
++"""Step 5: one transparent confidence score with components and penalties.
++
++The score is an explainable context index.  It is intentionally not labelled as a
++win probability, and in Phase 1 live mode it cannot gate legacy signals.
++"""
++from __future__ import annotations
++
++from .common import clamp
++
++WEIGHTS = {"regime": 20, "mtf": 25, "liquidity": 15, "fvg": 25, "location": 10, "data": 5}
++
++
++def _component(name, value, maximum, reason):
++    return {"name": name, "score": round(clamp(value, 0, maximum), 1), "max": maximum, "reason": reason}
++
++
++def _liq_score(direction, liq):
++    levels = liq.get("levels") or []
++    if direction == "bull":
++        swept_origin = any(x["side"] == "low" and x["status"] == "SWEPT" for x in levels)
++        target = liq.get("nearest_above")
++    else:
++        swept_origin = any(x["side"] == "high" and x["status"] == "SWEPT" for x in levels)
++        target = liq.get("nearest_below")
++    score = (8 if swept_origin else 2) + (7 if target else 0)
++    reason = ("Origin-side liquidity pernah swept; " if swept_origin else "Belum ada origin-side sweep; ") + \
++             (f"target intact terdekat {target['type']}." if target else "target intact belum tersedia.")
++    return score, reason
++
++
++def _for_direction(direction, regime, mtf, liq, fvg, data):
++    rdir, phase = regime.get("direction"), regime.get("phase")
++    if rdir == direction:
++        rv = 20 if phase == "EXPANSION" else 17 if phase == "TREND" else 12
++    elif rdir is None:
++        rv = 8 if phase == "RANGE" else 6
++    else:
++        rv = 1
++    c_reg = _component("Market regime", rv, 20, f"{regime.get('label', 'UNKNOWN')} vs {direction}.")
++
++    dscore = (mtf.get("bull_score") if direction == "bull" else mtf.get("bear_score")) or 0
++    c_mtf = _component("MTF structure", 25 * dscore / 100, 25,
++                       f"Hierarchy directional score {dscore:.1f}/100; konflik: {', '.join(mtf.get('conflicts') or []) or 'tidak ada'}.")
++
++    lv, lr = _liq_score(direction, liq)
++    c_liq = _component("Liquidity context", lv, 15, lr)
++
++    candidates = [x for x in fvg.get("active") or [] if x.get("direction") == direction]
++    best = candidates[0] if candidates else None
++    fv = 25 * best["score"] / 100 if best else 0
++    c_fvg = _component("FVG quality", fv, 25,
++                       f"{best['tf']} {best['grade']} {best['score']}/100 ({best['id']})." if best else "Tidak ada FVG aktif searah.")
++
++    loc_factor = next((x for x in (best or {}).get("factors", []) if x["name"] == "Active-leg location"), None)
++    loc = (loc_factor["score"] if loc_factor else 0)
++    c_loc = _component("Location", loc, 10, loc_factor["reason"] if loc_factor else "Lokasi active leg belum tersedia.")
++    c_data = _component("Data integrity", 5 * data.get("score", 0) / 100, 5,
++                        f"{data.get('status', 'UNKNOWN')} {data.get('score', 0)}/100.")
++    components = [c_reg, c_mtf, c_liq, c_fvg, c_loc, c_data]
++
++    penalties = []
++    if mtf.get("conflicts"):
++        penalties.append({"name": "TF conflict", "value": -min(8, 3 * len(mtf["conflicts"])),
++                          "reason": "Satu atau lebih timeframe melawan bias terpilih."})
++    if phase == "TRANSITION":
++        penalties.append({"name": "Transition regime", "value": -8, "reason": "CHoCH/konflik membuat arah belum stabil."})
++    if phase == "COMPRESSION":
++        penalties.append({"name": "Compression", "value": -6, "reason": "Volatilitas menyusut; breakout belum terkonfirmasi."})
++    if not best:
++        penalties.append({"name": "No active FVG", "value": -8, "reason": "Tidak ada FVG aktif yang mendukung arah."})
++    if data.get("status") == "POOR":
++        penalties.append({"name": "Poor data", "value": -10, "reason": "Data-health rendah; interpretasi perlu hati-hati."})
++    base = sum(x["score"] for x in components)
++    total = round(clamp(base + sum(x["value"] for x in penalties)), 1)
++    return {"direction": direction, "score": total, "base_score": round(base, 1),
++            "components": components, "penalties": penalties, "fvg": best}
++
++
++def build(regime, mtf, liq, fvg, data):
++    bull = _for_direction("bull", regime, mtf, liq, fvg, data)
++    bear = _for_direction("bear", regime, mtf, liq, fvg, data)
++    lead, other = (bull, bear) if bull["score"] >= bear["score"] else (bear, bull)
++    spread = lead["score"] - other["score"]
++    if lead["score"] < 40:
++        direction, action = None, "NO_EDGE"
++    elif spread < 8:
++        direction, action = None, "MIXED_WATCH"
++    else:
++        direction = lead["direction"]
++        action = "BUY_WATCH" if direction == "bull" else "SELL_WATCH"
++    score = lead["score"] if direction else max(lead["score"], other["score"])
++    label = "HIGH" if score >= 80 else "GOOD" if score >= 65 else "MODERATE" if score >= 50 else "LOW"
++    selected = lead
++    return {
++        "direction": direction, "action": action, "score": score, "label": label,
++        "base_score": selected["base_score"], "components": selected["components"],
++        "penalties": selected["penalties"], "bull": bull["score"], "bear": bear["score"],
++        "spread": round(spread, 1), "blocking": False,
++        "description": "Confidence adalah context score 0–100, bukan probabilitas menang; Phase 1 live tidak memblokir sinyal.",
++    }
+diff -ruN original_repo/engine/intel/data_quality.py repo/engine/intel/data_quality.py
+--- original_repo/engine/intel/data_quality.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/data_quality.py	2026-11-12 08:58:27.879672112 +0000
+@@ -0,0 +1,92 @@
++"""Step 0: observable candle and resample integrity.
++
++No legacy candle is deleted and no signal is blocked.  The module reports defects and
++adds a confidence penalty, which makes live review possible without silently changing
++v20 behaviour.
++"""
++from __future__ import annotations
++
++import config
++from resample import TF_SEC
++from .common import clamp
++
++
++def _closed(rows, tf, now):
++    sec = TF_SEC[tf]
++    return [b for b in rows if b.get("t", 0) + sec <= now]
++
++
++def _source_gaps(rows, step, market):
++    gaps = []
++    for left, right in zip(rows, rows[1:]):
++        delta = right["t"] - left["t"]
++        if delta <= step:
++            continue
++        # Forex weekend closure is expected; shorter discontinuities are not.
++        if market == "forex" and delta >= 40 * 3600:
++            continue
++        gaps.append({"from": left["t"], "to": right["t"], "missing": max(0, delta // step - 1)})
++    return gaps
++
++
++def summarize(stores, market, now):
++    source_tf = "M1" if market == "crypto" else "M5"
++    step = TF_SEC[source_tf]
++    source = sorted(stores.get(source_tf) or [], key=lambda b: b["t"])
++    closed_source = _closed(source, source_tf, now)
++    times = [b["t"] for b in closed_source]
++    duplicate = len(times) - len(set(times))
++    gaps = _source_gaps(closed_source[-2000:], step, market)
++
++    tf_rows = {}
++    incomplete_total = complete_total = 0
++    for tf, rows in stores.items():
++        if tf not in TF_SEC:
++            continue
++        recent = _closed(rows, tf, now)[-120:]
++        measured = [b for b in recent if b.get("expected_n")]
++        incomplete = [b for b in measured if not b.get("complete", True)]
++        coverage = (sum(float(b.get("coverage", 1.0)) for b in measured) / len(measured)) if measured else 1.0
++        tf_rows[tf] = {
++            "closed": len(recent), "measured": len(measured), "incomplete": len(incomplete),
++            "coverage_pct": round(100 * coverage, 1),
++            "last_incomplete_t": incomplete[-1]["t"] if incomplete else None,
++        }
++        incomplete_total += len(incomplete)
++        complete_total += len(measured)
++
++    latest_t = closed_source[-1]["t"] if closed_source else None
++    age = max(0, now - (latest_t + step)) if latest_t else None
++    expected_run_gap = max(3 * step, 20 * 60)
++    stale = age is None or age > expected_run_gap
++    incomplete_ratio = incomplete_total / complete_total if complete_total else 0.0
++    score = 100.0
++    score -= min(30.0, sum(g["missing"] for g in gaps) * 4.0)
++    score -= min(15.0, duplicate * 5.0)
++    score -= min(35.0, incomplete_ratio * 100.0)
++    if stale:
++        score -= 20.0
++    score = round(clamp(score), 1)
++    status = "HEALTHY" if score >= 90 else "DEGRADED" if score >= 70 else "POOR"
++
++    notes = []
++    if duplicate:
++        notes.append(f"{duplicate} timestamp candle sumber duplikat.")
++    if gaps:
++        notes.append(f"{len(gaps)} gap sumber terdeteksi pada 2.000 candle terakhir.")
++    if incomplete_total:
++        notes.append(f"{incomplete_total}/{complete_total} candle resample terukur tidak lengkap.")
++    if stale:
++        notes.append("Candle sumber terakhir lebih tua dari batas pemantauan.")
++    if not notes:
++        notes.append("Tidak ada gap, duplikat, atau resample tidak lengkap pada jendela pemantauan.")
++
++    return {
++        "status": status, "score": score, "source_tf": source_tf, "last_source_t": latest_t,
++        "age_sec": age, "duplicates": duplicate, "gap_count": len(gaps),
++        "missing_source_bars": sum(g["missing"] for g in gaps), "recent_gaps": gaps[-5:],
++        "resample_incomplete": incomplete_total, "resample_measured": complete_total,
++        "timeframes": tf_rows, "notes": notes,
++        "blocking": False,
++        "description": "Observasi integritas data; Phase 1 live tidak memblokir sinyal lama.",
++    }
+diff -ruN original_repo/engine/intel/fvg_quality.py repo/engine/intel/fvg_quality.py
+--- original_repo/engine/intel/fvg_quality.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/fvg_quality.py	2026-11-12 09:00:01.400821818 +0000
+@@ -0,0 +1,130 @@
++"""Step 4: transparent FVG quality scoring (context score, not a probability)."""
++from __future__ import annotations
++
++from .common import clamp, price_session
++
++WEIGHTS = {"mtf": 20, "liquidity": 15, "displacement": 20, "regime": 15,
++           "freshness": 10, "location": 10, "session": 5, "data": 5}
++
++
++def _grade(score):
++    return "A+" if score >= 90 else "A" if score >= 80 else "B" if score >= 70 else "C" if score >= 60 else "D"
++
++
++def _factor(name, score, maximum, reason):
++    return {"name": name, "score": round(clamp(score, 0, maximum), 1), "max": maximum, "reason": reason}
++
++
++def _active_leg(smc, bars, direction, created):
++    events = [e for e in smc.get("events", []) if e.get("scope") == "swing" and e.get("dir") == direction and e.get("index", 0) <= created]
++    if not events:
++        return None
++    e = events[-1]
++    lo, hi = sorted((e.get("pivot_index", e["index"]), e["index"]))
++    rows = bars[lo:hi + 1]
++    if not rows:
++        return None
++    return {"bottom": min(b["l"] for b in rows), "top": max(b["h"] for b in rows), "event": e.get("id")}
++
++
++def _mitigation(zone, bars):
++    width = max(zone["top"] - zone["bottom"], 1e-12)
++    rows = bars[zone["created"] + 1:]
++    if not rows:
++        return 0.0
++    if zone["dir"] == "bull":
++        low = min(b["l"] for b in rows)
++        return clamp((zone["top"] - low) / width, 0, 1)
++    high = max(b["h"] for b in rows)
++    return clamp((high - zone["bottom"]) / width, 0, 1)
++
++
++def _score_one(tf, zone, tfa, mtf, regime, data_score):
++    bars, smc, atr = tfa.get("_bars") or [], tfa.get("_smc") or {}, tfa.get("_atr14") or []
++    i = min(zone.get("created", 0), len(bars) - 1)
++    mid_i = max(0, i - 1)
++    bar = bars[mid_i]
++    a = atr[mid_i] if atr and mid_i < len(atr) else max(bar["h"] - bar["l"], 1e-12)
++    body = abs(bar["c"] - bar["o"])
++    body_ratio = body / max(bar["h"] - bar["l"], 1e-12)
++    impulse = body / max(a, 1e-12)
++    disp_norm = clamp((impulse - 0.35) / 1.15, 0, 1) * 0.65 + clamp((body_ratio - 0.35) / 0.45, 0, 1) * 0.35
++    f_disp = _factor("Displacement", 20 * disp_norm, 20,
++                     f"Body {impulse:.2f} ATR; body/range {body_ratio:.0%} pada candle impuls.")
++
++    direction = zone["dir"]
++    directional = (mtf.get("bull_score") if direction == "bull" else mtf.get("bear_score")) or 0
++    f_mtf = _factor("MTF alignment", 20 * directional / 100, 20,
++                    f"Skor hierarchy {direction} {directional:.1f}/100.")
++
++    sweeps = [s for s in smc.get("sweeps", []) if s.get("dir") == direction and 0 <= i - s.get("index", -9999) <= 12]
++    if sweeps:
++        latest = sweeps[-1]
++        liq_score = 15 if latest.get("scope") == "swing" or latest.get("pool_label") else 11
++        liq_reason = f"Sweep {latest.get('side')} {i - latest.get('index', i)} candle sebelum FVG."
++    else:
++        liq_score, liq_reason = 2, "Tidak ada sweep searah dalam 12 candle sebelum FVG."
++    f_liq = _factor("Liquidity sweep", liq_score, 15, liq_reason)
++
++    rdir, phase = regime.get("direction"), regime.get("phase")
++    if rdir == direction and phase in ("TREND", "EXPANSION"):
++        reg_score = 15 if phase == "EXPANSION" else 13
++    elif phase == "RANGE":
++        reg_score = 7
++    elif phase == "COMPRESSION":
++        reg_score = 4
++    elif rdir and rdir != direction:
++        reg_score = 0
++    else:
++        reg_score = 6
++    f_reg = _factor("Regime compatibility", reg_score, 15,
++                    f"Regime {regime.get('label', 'UNKNOWN')} vs FVG {direction}.")
++
++    age = max(0, len(bars) - 1 - i)
++    mitigation = _mitigation(zone, bars)
++    age_score = 10 if age <= 5 else 8 if age <= 12 else 6 if age <= 30 else 3 if age <= 80 else 1
++    freshness = age_score * (1 - 0.65 * mitigation)
++    f_fresh = _factor("Freshness", freshness, 10,
++                      f"Umur {age} candle; mitigasi wick {mitigation * 100:.0f}%.")
++
++    leg = _active_leg(smc, bars, direction, i)
++    center = (zone["top"] + zone["bottom"]) / 2
++    if leg and leg["top"] > leg["bottom"]:
++        pos = (center - leg["bottom"]) / (leg["top"] - leg["bottom"])
++        favorable = 1 - pos if direction == "bull" else pos
++        location = 10 * clamp((favorable - 0.35) / 0.45, 0, 1)
++        loc_reason = f"Titik tengah FVG di {pos * 100:.0f}% active BOS/CHoCH leg."
++    else:
++        pos, location, loc_reason = None, 4, "Active structure leg belum tersedia; tidak diberi nilai penuh."
++    f_loc = _factor("Active-leg location", location, 10, loc_reason)
++
++    ses = price_session(zone.get("t", bar["t"]))
++    ses_score = 5 if ses == "LONDON_NY_OVERLAP" else 4 if ses in ("LONDON", "NEW_YORK") else 3 if ses == "ASIA" else 1
++    f_ses = _factor("Formation session", ses_score, 5,
++                    f"FVG terbentuk pada {ses.replace('_', ' ').title()}; ini konteks, bukan Session Intelligence statistik.")
++    f_data = _factor("Data integrity", 5 * data_score / 100, 5, f"Data-health score {data_score:.1f}/100.")
++    factors = [f_mtf, f_liq, f_disp, f_reg, f_fresh, f_loc, f_ses, f_data]
++    score = round(sum(f["score"] for f in factors), 1)
++    return {
++        "id": zone["id"], "tf": tf, "direction": direction, "top": zone["top"], "bottom": zone["bottom"],
++        "created_t": zone.get("t"), "age_bars": age, "mitigation_pct": round(mitigation * 100, 1),
++        "score": score, "grade": _grade(score), "factors": factors,
++        "active_leg_position_pct": round(pos * 100, 1) if pos is not None else None,
++        "status": zone.get("status", "active"),
++        "description": "Skor konteks deterministik; bukan probabilitas menang dan belum dikalibrasi sebagai filter.",
++    }
++
++
++def build(tfs, mtf, regimes, data_score):
++    rows = []
++    for tf in mtf.get("used") or []:
++        tfa = tfs.get(tf) or {}
++        smc = tfa.get("_smc") or {}
++        if not tfa.get("enough"):
++            continue
++        for zone in smc.get("fvg") or []:
++            rows.append(_score_one(tf, zone, tfa, mtf, regimes.get(tf) or {}, data_score))
++    rows.sort(key=lambda x: (x["score"], x["created_t"] or 0), reverse=True)
++    best = rows[0] if rows else None
++    return {"best": best, "active": rows[:12], "weights": WEIGHTS,
++            "description": "FVG aktif dinilai dari alignment, sweep, displacement, regime, freshness, active leg, sesi, dan kualitas data."}
+diff -ruN original_repo/engine/intel/liqmap.py repo/engine/intel/liqmap.py
+--- original_repo/engine/intel/liqmap.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/liqmap.py	2026-11-12 08:59:29.991855142 +0000
+@@ -0,0 +1,127 @@
++"""Step 3: auditable price-level liquidity map.
++
++The name is conventional SMC vocabulary.  These OHLC-derived reference levels are not
++claims about resting orders; true executable liquidity requires an order book.
++"""
++from __future__ import annotations
++
++from datetime import datetime, timedelta, timezone
++from zoneinfo import ZoneInfo
++
++from resample import bucket_start
++from .common import LONDON, NY, UTC
++
++
++def _state(level, side, after):
++    swept_t = broken_t = None
++    for b in after:
++        wick = b["h"] > level if side == "high" else b["l"] < level
++        close_break = b["c"] > level if side == "high" else b["c"] < level
++        if close_break and broken_t is None:
++            broken_t = b["t"]
++            break
++        if wick and swept_t is None:
++            swept_t = b["t"]
++    status = "BROKEN" if broken_t is not None else "SWEPT" if swept_t is not None else "INTACT"
++    return status, broken_t or swept_t
++
++
++def _period_groups(bars, tf, market):
++    groups = {}
++    for b in bars:
++        groups.setdefault(bucket_start(b["t"], tf, market), []).append(b)
++    return groups
++
++
++def _previous_period_levels(bars, tf, market, prefix):
++    groups = _period_groups(bars, tf, market)
++    keys = sorted(groups)
++    if len(keys) < 2:
++        return []
++    start = keys[-2]
++    rows = groups[start]
++    end = keys[-1]
++    after = [b for b in bars if b["t"] >= end]
++    high, low = max(b["h"] for b in rows), min(b["l"] for b in rows)
++    out = []
++    for typ, value, side in ((prefix + "H", high, "high"), (prefix + "L", low, "low")):
++        status, event_t = _state(value, side, after)
++        out.append({"type": typ, "side": side, "price": value, "period_start": start,
++                    "period_end": end, "status": status, "event_t": event_t,
++                    "description": f"{typ} {status.lower()}: ekstrem periode sebelumnya."})
++    return out
++
++
++def _session_window(now, tz, start_hour, end_hour, bars):
++    local_now = datetime.fromtimestamp(now, UTC).astimezone(tz)
++    candidates = []
++    for days in range(0, 8):
++        date = (local_now - timedelta(days=days)).date()
++        start = datetime(date.year, date.month, date.day, start_hour, tzinfo=tz)
++        end = datetime(date.year, date.month, date.day, end_hour, tzinfo=tz)
++        if end <= start:
++            end += timedelta(days=1)
++        s, e = int(start.timestamp()), int(end.timestamp())
++        rows = [b for b in bars if s <= b["t"] < e]
++        if rows and e <= now:
++            candidates.append((s, e, rows))
++    return max(candidates, key=lambda x: x[0]) if candidates else None
++
++
++def _session_levels(bars, now, name, tz, start_hour, end_hour):
++    win = _session_window(now, tz, start_hour, end_hour, bars)
++    if not win:
++        return []
++    start, end, rows = win
++    after = [b for b in bars if b["t"] >= end]
++    high, low = max(b["h"] for b in rows), min(b["l"] for b in rows)
++    out = []
++    for suffix, value, side in (("HIGH", high, "high"), ("LOW", low, "low")):
++        typ = f"{name}_{suffix}"
++        status, event_t = _state(value, side, after)
++        out.append({"type": typ, "side": side, "price": value, "period_start": start,
++                    "period_end": end, "status": status, "event_t": event_t,
++                    "description": f"Ekstrem sesi {name.title()} terakhir yang sudah selesai."})
++    return out
++
++
++def _smc_levels(tfs, top_tf):
++    a = tfs.get(top_tf) or {}
++    pools = (a.get("liquidity") or [])[-10:]
++    out = []
++    for p in pools:
++        typ = p.get("label") or ("SWING_HIGH" if p.get("side") == "BSL" else "SWING_LOW")
++        out.append({"type": typ, "side": "high" if p.get("side") == "BSL" else "low",
++                    "price": p.get("level"), "period_start": p.get("t"), "period_end": None,
++                    "status": "INTACT", "event_t": None,
++                    "description": "Pool pivot aktif dari canonical SMC engine."})
++    return out
++
++
++def build(market, tfs, top_tf, now, price, digits):
++    base_tf = "M15" if (tfs.get("M15") or {}).get("_bars") else "H1"
++    bars = (tfs.get(base_tf) or {}).get("_bars") or []
++    levels = []
++    if bars:
++        levels += _previous_period_levels(bars, "D", market, "PD")
++        levels += _previous_period_levels(bars, "W", market, "PW")
++        levels += _session_levels(bars, now, "ASIA", UTC, 0, 8)
++        levels += _session_levels(bars, now, "LONDON", LONDON, 8, 16)
++        levels += _session_levels(bars, now, "NEW_YORK", NY, 8, 17)
++    levels += _smc_levels(tfs, top_tf)
++
++    atr = (tfs.get("H1") or {}).get("atr14") or (tfs.get(top_tf) or {}).get("atr14") or 0
++    for lv in levels:
++        lv["price"] = round(float(lv["price"]), digits)
++        lv["distance"] = round(abs(lv["price"] - price), digits)
++        lv["distance_atr"] = round(abs(lv["price"] - price) / atr, 2) if atr else None
++    active = [x for x in levels if x["status"] == "INTACT"]
++    above = min((x for x in active if x["price"] > price), key=lambda x: x["price"] - price, default=None)
++    below = min((x for x in active if x["price"] < price), key=lambda x: price - x["price"], default=None)
++    return {
++        "levels": levels, "nearest_above": above, "nearest_below": below,
++        "intact": sum(x["status"] == "INTACT" for x in levels),
++        "swept": sum(x["status"] == "SWEPT" for x in levels),
++        "broken": sum(x["status"] == "BROKEN" for x in levels),
++        "description": "Level referensi berbasis OHLC/pivot, bukan ukuran resting order book atau jaminan reversal.",
++    }
+diff -ruN original_repo/engine/intel/mtf.py repo/engine/intel/mtf.py
+--- original_repo/engine/intel/mtf.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/mtf.py	2026-11-12 08:59:06.395858770 +0000
+@@ -0,0 +1,76 @@
++"""Step 2: multi-timeframe structure hierarchy and conflict reporting."""
++from __future__ import annotations
++
++from .common import clamp, direction_label
++
++WEIGHTS = {"D": 35.0, "H4": 30.0, "H1": 20.0, "M15": 15.0}
++
++
++def _state(tf, a, reg):
++    enough = bool(a.get("enough"))
++    swing, internal = a.get("swing_structure"), a.get("internal_structure")
++    if not enough:
++        return {"tf": tf, "available": False, "direction": None, "conviction": 0.0,
++                "structure": "DATA_KURANG", "regime": (reg or {}).get("label")}
++    if swing and internal and swing == internal:
++        direction, conviction, structure = swing, 1.0, "ALIGNED"
++    elif swing and internal:
++        direction, conviction, structure = swing, 0.58, "PULLBACK_CONFLICT"
++    elif swing:
++        direction, conviction, structure = swing, 0.78, "SWING_ONLY"
++    elif internal:
++        direction, conviction, structure = internal, 0.45, "INTERNAL_ONLY"
++    else:
++        direction, conviction, structure = None, 0.20, "NEUTRAL"
++    rdir = (reg or {}).get("direction")
++    if rdir and direction and rdir != direction:
++        conviction *= 0.75
++        structure += "_REGIME_CONFLICT"
++    return {"tf": tf, "available": True, "direction": direction,
++            "label": direction_label(direction), "conviction": round(conviction, 3),
++            "structure": structure, "regime": (reg or {}).get("label")}
++
++
++def select_timeframes(market, tfs):
++    d_ready = bool((tfs.get("D") or {}).get("enough"))
++    requested = ["D", "H4", "H1", "M15"] if market == "crypto" or d_ready else ["H4", "H1", "M15"]
++    used = [tf for tf in requested if (tfs.get(tf) or {}).get("enough")]
++    if not used:
++        used = [tf for tf in ("H4", "H1", "M15") if tf in tfs]
++    return requested, used, d_ready
++
++
++def build(market, tfs, regimes):
++    requested, used, d_ready = select_timeframes(market, tfs)
++    states = []
++    for tf in requested:
++        states.append(_state(tf, tfs.get(tf) or {}, regimes.get(tf) or {}))
++    active = [s for s in states if s["tf"] in used and s["available"]]
++    total_w = sum(WEIGHTS[s["tf"]] for s in active) or 1.0
++
++    bull = sum(WEIGHTS[s["tf"]] * (0.5 if s["direction"] is None else
++                                   s["conviction"] if s["direction"] == "bull" else 0.0) for s in active) / total_w
++    bear = sum(WEIGHTS[s["tf"]] * (0.5 if s["direction"] is None else
++                                   s["conviction"] if s["direction"] == "bear" else 0.0) for s in active) / total_w
++    if bull >= bear and bull >= 0.55:
++        bias, chosen = "bull", bull
++    elif bear > bull and bear >= 0.55:
++        bias, chosen = "bear", bear
++    else:
++        bias, chosen = None, max(bull, bear)
++    alignment = round(clamp(chosen * 100), 1)
++    conflicts = [s["tf"] for s in active if bias and s["direction"] and s["direction"] != bias]
++    label = "STRONG" if alignment >= 80 and not conflicts else "ALIGNED" if alignment >= 65 else "MIXED" if alignment >= 45 else "NEUTRAL"
++
++    if market == "forex" and not d_ready:
++        fallback = "D XAUUSD belum cukup; hierarchy aman memakai H4 → H1 → M15."
++    elif market == "crypto":
++        fallback = "Hierarchy crypto D → H4 → H1 → M15; TF yang belum cukup ditandai, bukan dipaksakan."
++    else:
++        fallback = "D XAUUSD sudah cukup dan ikut hierarchy D → H4 → H1 → M15."
++    return {
++        "bias": bias, "bias_label": direction_label(bias), "alignment": alignment, "label": label,
++        "bull_score": round(bull * 100, 1), "bear_score": round(bear * 100, 1),
++        "requested": requested, "used": used, "d_ready": d_ready, "states": states,
++        "conflicts": conflicts, "description": fallback,
++    }
+diff -ruN original_repo/engine/intel/pipeline.py repo/engine/intel/pipeline.py
+--- original_repo/engine/intel/pipeline.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/pipeline.py	2026-11-12 09:00:38.990935944 +0000
+@@ -0,0 +1,55 @@
++"""Orchestration for Phase 1 steps 0–5."""
++from __future__ import annotations
++
++import config
++from . import confidence, data_quality, fvg_quality, liqmap, mtf, regime
++
++VERSION = 1
++
++GLOSSARY = {
++    "BULLISH_TREND": "Struktur directional bullish dengan perjalanan harga relatif efisien.",
++    "BEARISH_TREND": "Struktur directional bearish dengan perjalanan harga relatif efisien.",
++    "BULLISH_EXPANSION": "Trend bullish disertai pelebaran range/volatilitas.",
++    "BEARISH_EXPANSION": "Trend bearish disertai pelebaran range/volatilitas.",
++    "RANGE": "Arah tidak cukup efisien; harga lebih banyak berotasi.",
++    "COMPRESSION": "ATR percentile dan range jangka pendek menyusut.",
++    "TRANSITION": "CHoCH atau konflik swing/internal membuat karakter belum stabil.",
++    "INTACT": "Level belum dilampaui wick maupun close setelah periode pembentuknya selesai.",
++    "SWEPT": "Wick melewati level lalu close kembali; bukan jaminan reversal.",
++    "BROKEN": "Candle close melewati level referensi.",
++}
++
++
++def build_intelligence(sym, market, stores, tfs, now, price, digits):
++    data = data_quality.summarize(stores, market, now)
++    requested, used, d_ready = mtf.select_timeframes(market, tfs)
++    top_tf = used[0] if used else ("H4" if market == "forex" else "D")
++    reg = regime.build(tfs, top_tf, data["score"])
++    hierarchy = mtf.build(market, tfs, reg.get("per_tf") or {})
++    liquidity = liqmap.build(market, tfs, top_tf, now, price, digits)
++    fvg = fvg_quality.build(tfs, hierarchy, reg.get("per_tf") or {}, data["score"])
++    conf = confidence.build(reg, hierarchy, liquidity, fvg, data)
++    return {
++        "version": VERSION, "enabled": True, "mode": config.INTEL_MODE, "blocking": False,
++        "symbol": sym, "market": market, "asof": now, "top_tf": top_tf,
++        "data_quality": data, "regime": reg, "mtf": hierarchy,
++        "liquidity": liquidity, "fvg_quality": fvg, "confidence": conf,
++        "glossary": GLOSSARY,
++        "notice": "Decision-support context only. Scores are deterministic and explainable, not calibrated win probabilities.",
++    }
++
++
++def telegram_suffix(intel):
++    if not intel or config.INTEL_MODE != "live":
++        return ""
++    reg, mtf_, conf = intel["regime"], intel["mtf"], intel["confidence"]
++    best = (intel.get("fvg_quality") or {}).get("best")
++    direction = "BUY" if conf.get("direction") == "bull" else "SELL" if conf.get("direction") == "bear" else "MIXED"
++    fvg_line = (f"\nFVG terbaik: <b>{best['tf']} {best['grade']} {best['score']}/100</b>" if best else
++                "\nFVG terbaik: belum ada FVG aktif")
++    return ("\n\n🧠 <b>MARKET INTELLIGENCE · LIVE</b>"
++            f"\nRegime: <b>{reg.get('label')}</b> ({reg.get('strength')}/100)"
++            f"\nMTF: <b>{mtf_.get('bias_label')}</b> · alignment {mtf_.get('alignment')}/100"
++            f"{fvg_line}"
++            f"\nContext: <b>{direction} {conf.get('score')}/100 · {conf.get('label')}</b>"
++            "\n<i>Context score, bukan probabilitas; tidak memblokir sinyal.</i>")
+diff -ruN original_repo/engine/intel/regime.py repo/engine/intel/regime.py
+--- original_repo/engine/intel/regime.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/regime.py	2026-11-12 08:58:49.086722712 +0000
+@@ -0,0 +1,112 @@
++"""Step 1: deterministic, explainable market-regime classification."""
++from __future__ import annotations
++
++from statistics import median
++
++import config
++from .common import clamp, efficiency_ratio, percentile_rank, rolling_true_ranges, robust_ratio
++
++
++def _latest_direction(tfa):
++    swing = tfa.get("swing_structure")
++    internal = tfa.get("internal_structure")
++    if swing and swing == internal:
++        return swing, 1.0
++    if swing:
++        return swing, 0.72 if not internal else 0.55
++    if internal:
++        return internal, 0.42
++    return None, 0.0
++
++
++def classify(tf, tfa, data_score=100.0):
++    bars = tfa.get("_bars") or []
++    atr = tfa.get("_atr14") or []
++    if not tfa.get("enough") or len(bars) < 30:
++        return {
++            "tf": tf, "label": "INSUFFICIENT_DATA", "direction": None, "phase": "UNKNOWN",
++            "strength": 0, "metrics": {}, "reasons": [f"Data {tf} belum cukup untuk klasifikasi stabil."],
++            "description": "Tidak diklasifikasikan; engine lama tetap berjalan.",
++        }
++
++    closes = [b["c"] for b in bars]
++    tr = rolling_true_ranges(bars)
++    er = efficiency_ratio(closes, int(getattr(config, "INTEL_REGIME_LOOKBACK", 20)))
++    hist = atr[-120:] if atr else tr[-120:]
++    current_atr = atr[-1] if atr else tr[-1]
++    vol_pct = percentile_rank(hist, current_atr)
++    atr_ratio = robust_ratio(current_atr, median(hist) if hist else current_atr)
++    recent_range = sum(tr[-8:]) / min(8, len(tr))
++    prior = tr[-38:-8] or tr[:-8] or tr
++    prior_range = sum(prior) / len(prior)
++    expansion = robust_ratio(recent_range, prior_range)
++
++    direction, structure_quality = _latest_direction(tfa)
++    recent_events = (tfa.get("events") or [])[-5:]
++    recent_choch = any(e.get("type") == "CHoCH" for e in recent_events[-2:])
++    directional_disp = sum(1 for e in recent_events[-4:] if e.get("dir") == direction and e.get("displacement"))
++    opposing = bool(direction and any(e.get("dir") != direction for e in recent_events[-2:]))
++
++    compression = vol_pct <= 0.30 and expansion <= 0.86 and er <= 0.32
++    expanding = (vol_pct >= 0.65 and expansion >= 1.12) or (directional_disp and expansion >= 1.02)
++    trending = bool(direction) and structure_quality >= 0.55 and er >= 0.25 and not opposing
++    transition = recent_choch or opposing or (tfa.get("swing_structure") and tfa.get("internal_structure") and
++                                               tfa["swing_structure"] != tfa["internal_structure"])
++
++    if compression:
++        label, phase, out_dir = "COMPRESSION", "COMPRESSION", direction
++    elif expanding and trending:
++        label = ("BULLISH" if direction == "bull" else "BEARISH") + "_EXPANSION"
++        phase, out_dir = "EXPANSION", direction
++    elif transition:
++        label, phase, out_dir = "TRANSITION", "TRANSITION", direction
++    elif trending:
++        label = ("BULLISH" if direction == "bull" else "BEARISH") + "_TREND"
++        phase, out_dir = "TREND", direction
++    else:
++        label, phase, out_dir = "RANGE", "RANGE", None
++
++    trend_component = 40 * structure_quality + 30 * min(1.0, er / 0.45) + 15 * min(1.0, directional_disp / 2)
++    if phase == "EXPANSION":
++        trend_component += 15 * min(1.0, max(0.0, expansion - 1.0) / 0.35)
++    elif phase == "COMPRESSION":
++        trend_component = 45 + 35 * (1 - vol_pct) + 20 * max(0.0, 1 - expansion)
++    elif phase == "RANGE":
++        trend_component = 45 + 35 * (1 - er) + 20 * (1 - abs(vol_pct - 0.5))
++    elif phase == "TRANSITION":
++        trend_component = 35 + 20 * structure_quality + 15 * er
++    strength = round(clamp(trend_component * (0.7 + 0.3 * data_score / 100)), 1)
++
++    reasons = [
++        f"Struktur swing/internal: {tfa.get('swing_structure') or '-'} / {tfa.get('internal_structure') or '-'}.",
++        f"Directional efficiency {er:.2f}; makin dekat 1 berarti lintasan makin searah.",
++        f"ATR percentile {vol_pct * 100:.0f}% dan ATR/median {atr_ratio:.2f}x.",
++        f"Range 8 candle vs baseline: {expansion:.2f}x.",
++    ]
++    if recent_choch:
++        reasons.append("CHoCH baru meningkatkan risiko fase transisi.")
++    description = {
++        "COMPRESSION": "Volatilitas dan rentang menyusut; breakout belum dianggap terkonfirmasi.",
++        "EXPANSION": "Range dan volatilitas melebar bersama struktur searah; continuation mendapat konteks lebih kuat.",
++        "TRANSITION": "Struktur internal/swing berubah atau berkonflik; arah belum stabil.",
++        "TREND": "Struktur dan efisiensi harga mendukung pergerakan directional.",
++        "RANGE": "Perjalanan harga tidak cukup efisien/directional; sweep tepi range lebih relevan daripada mengejar breakout.",
++    }[phase]
++    return {
++        "tf": tf, "label": label, "direction": out_dir, "phase": phase, "strength": strength,
++        "volatility": "HIGH" if vol_pct >= 0.75 else "LOW" if vol_pct <= 0.25 else "NORMAL",
++        "metrics": {"efficiency": round(er, 3), "atr_percentile": round(vol_pct * 100, 1),
++                    "atr_ratio": round(atr_ratio, 3), "range_expansion": round(expansion, 3),
++                    "directional_displacement": directional_disp},
++        "reasons": reasons, "description": description,
++    }
++
++
++def build(tfs, top_tf, data_score=100.0):
++    primary = classify(top_tf, tfs.get(top_tf) or {}, data_score)
++    per_tf = {}
++    for tf in ("D", "H4", "H1", "M15"):
++        if tf in tfs:
++            per_tf[tf] = classify(tf, tfs[tf], data_score)
++    primary["per_tf"] = per_tf
++    return primary
+diff -ruN original_repo/engine/intel/store.py repo/engine/intel/store.py
+--- original_repo/engine/intel/store.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/engine/intel/store.py	2026-11-12 09:00:46.392940253 +0000
+@@ -0,0 +1,37 @@
++"""Persistent, bounded intelligence snapshots for live review and later calibration."""
++from __future__ import annotations
++
++import json
++import os
++
++import config
++from .common import compact_snapshot
++
++
++class SnapshotStore:
++    def __init__(self, store_dir, symbol):
++        self.symbol = symbol
++        self.path = os.path.join(store_dir, "intel", f"{symbol}.json")
++        try:
++            with open(self.path, encoding="utf-8") as fh:
++                self.data = json.load(fh)
++        except (OSError, ValueError):
++            self.data = {"symbol": symbol, "latest": None, "history": []}
++
++    def add(self, intel):
++        self.data["latest"] = intel
++        small = compact_snapshot(intel)
++        history = self.data.setdefault("history", [])
++        if small and (not history or history[-1].get("asof") != small.get("asof")):
++            history.append(small)
++        limit = int(getattr(config, "INTEL_HISTORY_LIMIT", 5000))
++        self.data["history"] = history[-limit:]
++
++    def save(self, public_path=None):
++        os.makedirs(os.path.dirname(self.path), exist_ok=True)
++        with open(self.path, "w", encoding="utf-8") as fh:
++            json.dump(self.data, fh, separators=(",", ":"))
++        if public_path:
++            os.makedirs(os.path.dirname(public_path), exist_ok=True)
++            with open(public_path, "w", encoding="utf-8") as fh:
++                json.dump(self.data, fh, separators=(",", ":"))
+diff -ruN original_repo/engine/journal.py repo/engine/journal.py
+--- original_repo/engine/journal.py	2026-11-12 09:09:23.173251386 +0000
++++ repo/engine/journal.py	2026-11-12 09:05:50.196153259 +0000
+@@ -102,7 +102,7 @@
+         self.entries = data.get("entries", {})
+         self.closed_now = []          # entry yang baru selesai (FULL: TP2/SL) pada run ini
+ 
+-    def merge(self, kind, recs, now):
++    def merge(self, kind, recs, now, intel=None):
+         """Tambahkan record baru. Return list record baru."""
+         book = self.setups if kind == "setups" else self.entries
+         new = []
+@@ -111,7 +111,13 @@
+                 continue
+             sec = TF_SEC.get(r.get("tf"), 900)
+             rec = {k: v for k, v in r.items() if not k.startswith("_")}
+-            rec.update(symbol=self.sym, first_seen=now, src="live" if r["close_t"] >= now - 2 * sec else "replay")
++            src = "live" if r["close_t"] >= now - 2 * sec else "replay"
++            rec.update(symbol=self.sym, first_seen=now, src=src)
++            # Phase 1: immutable context as it was when this record first appeared.
++            # Replay records are not stamped with today's context: reconstructing a
++            # historical score requires a dedicated candle-by-candle replay.
++            if intel is not None and src == "live":
++                rec["intel"] = intel
+             rec.update(outcome(rec, []))
+             book[r["id"]] = rec
+             new.append(rec)
+diff -ruN original_repo/engine/main.py repo/engine/main.py
+--- original_repo/engine/main.py	2026-11-12 09:09:23.172251386 +0000
++++ repo/engine/main.py	2026-11-12 09:05:56.485155215 +0000
+@@ -31,6 +31,8 @@
+ from charts import render
+ from data_source import fetch_candles, fetch_history
+ from journal import Journal, stats
++from intel import SnapshotStore, build_intelligence, telegram_suffix
++from intel.common import compact_snapshot
+ from orderflow import book_metrics, flow_summary, trade_metrics
+ from resample import TF_SEC, closed_only, resample, upsert
+ from telegram_notify import send_message, send_photo
+@@ -244,10 +246,24 @@
+         ov = overall(tfs, d)
+         fib_primary = (tfs.get(config.FIB_PRIMARY_TF) or {}).get("fib")
+ 
++        # ----- Phase 1 Intelligence: read-only context over the canonical engine -----
++        intel_ctx = None
++        if config.INTEL_ENABLED:
++            try:
++                intel_ctx = build_intelligence(sym, market, stores, tfs, self.now, price, d)
++                intel_store = SnapshotStore(self.store, sym)
++                intel_store.add(intel_ctx)
++                intel_store.save(os.path.join(self.site, "data", f"intel_{sym}.json"))
++            except Exception as e:      # intelligence failure must never stop legacy v20
++                self.warnings.append(f"Intel {sym} gagal: {e.__class__.__name__}: {e}")
++                intel_ctx = {"enabled": True, "mode": config.INTEL_MODE, "error": f"{e.__class__.__name__}: {e}",
++                             "blocking": False, "asof": self.now}
++
+         # ----- jurnal permanen: setup semua TF + entry top-down, lalu nilai hasilnya -----
+         jr = Journal(self.store, sym)
+-        new_setups = {tf: jr.merge("setups", tfs[tf].get("setups", []), self.now) for tf in tfs_list}
+-        new_entries = jr.merge("entries", ov.get("entries", []), self.now)
++        intel_journal = compact_snapshot(intel_ctx)
++        new_setups = {tf: jr.merge("setups", tfs[tf].get("setups", []), self.now, intel_journal) for tf in tfs_list}
++        new_entries = jr.merge("entries", ov.get("entries", []), self.now, intel_journal)
+         entry_tfs = [tf for tf in ("M1", "M5", "M15", "H1") if tf in tfs_list]
+         jr.update_outcomes(closed, entry_tfs)
+         jr.save()
+@@ -304,7 +320,8 @@
+         ov_small = {k: v for k, v in ov.items() if k != "entries"}
+         pair = {"market": market, "digits": d, "price": round(price, d), "last_ts": src[-1]["t"],
+                 "received": received, "counts": {tf: len(stores[tf][-config.STORE_LIMIT[tf]:]) for tf in tfs_list},
+-                "tf": tfs_small, "overall": ov_small, "journal": pub["stats"], "fib_primary": fib_primary, **extra}
++                "tf": tfs_small, "overall": ov_small, "journal": pub["stats"], "fib_primary": fib_primary,
++                "intel": intel_ctx, **extra}
+         if config.SIGNALS_ON:
+             self.alerts(sym, pair, new_setups, new_entries, jr.closed_now)
+             self.zone_alerts(sym, pair, tfs)
+@@ -317,6 +334,8 @@
+                 new = mon.scan(tfs, d, self.now)
+                 self.monitors[sym] = mon
+                 for rec in new:
++                    if rec.get("src") == "live" and intel_journal is not None:
++                        rec["intel"] = intel_journal
+                     if rec["notif"] != "QUEUED":
+                         continue
+                     photo = None
+@@ -326,7 +345,8 @@
+                     prio = {"CONFLUENCE": 3, "OB_FVG_OVERLAP": 2, "HTF_FIB": 2}.get(rec["type"], 1)
+                     if rec["type"] == "HTF_POI":     # v20
+                         prio = {"POI": 2, "CHOCH": 3, "CONFIRMED": 3}.get(rec.get("stage"), 1)
+-                    self.notify(monitor.message(sym, rec, d, price), photo, prio=prio, key=rec["id"], sym=sym)
++                    self.notify(monitor.message(sym, rec, d, price) + telegram_suffix(intel_ctx),
++                                photo, prio=prio, key=rec["id"], sym=sym)
+                 pair["monitor"] = mon.summary()
+             except Exception as e:      # noqa: BLE001 – monitor gagal tidak boleh menghentikan engine
+                 self.warnings.append(f"Monitor {sym} gagal: {e.__class__.__name__}: {e}")
+@@ -376,6 +396,10 @@
+             self.warnings.append(f"Chart {sym} {tf} gagal dibuat: {e}")
+ 
+     # ---------- ALERT: 🟡 STRUCTURE -> 🟠 SETUP READY -> 🚨 ENTRY -> 🏁 HASIL ----------
++    @staticmethod
++    def _with_intel(text, pair):
++        return text + telegram_suffix((pair or {}).get("intel"))
++
+     def alerts(self, sym, pair, new_setups, new_entries, closed_now):
+         first = not self.p["init"].get(sym)
+         for tf in config.ALERT_TFS:
+@@ -391,19 +415,19 @@
+                     continue
+                 self.mark(k)
+                 if not first:
+-                    self.notify(self.msg_structure(sym, tf, e, pair), prio=1)
++                    self.notify(self._with_intel(self.msg_structure(sym, tf, e, pair), pair), prio=1)
+         if not first:
+             for s in new_setups.get(config.SETUP_TF, []):
+                 if s["src"] == "live":
+-                    self.notify(self.msg_setup(sym, s, pair), prio=2)
++                    self.notify(self._with_intel(self.msg_setup(sym, s, pair), pair), prio=2)
+             for e in new_entries:
+                 if e["src"] == "live":
+                     photo = (os.path.join(self.store, "charts", f"{sym}_{config.SETUP_TF}.png")
+                              if config.ALERT_WITH_CHART else None)
+-                    self.notify(self.msg_entry(sym, e, pair), photo, prio=3)
++                    self.notify(self._with_intel(self.msg_entry(sym, e, pair), pair), photo, prio=3)
+             for e in closed_now:
+                 if e["src"] == "live":
+-                    self.notify(self.msg_result(sym, e, pair), prio=2)
++                    self.notify(self._with_intel(self.msg_result(sym, e, pair), pair), prio=2)
+         else:
+             self.p["init"][sym] = self.now
+             ov = pair["overall"]
+@@ -450,7 +474,7 @@
+                 if ev["stage"] == "CONFIRMED" and config.ALERT_WITH_CHART:
+                     photo = os.path.join(self.store, "charts", f"{sym}_{tf}.png")
+                 prio = {"CONFIRMED": 3, "SETUP": 2}.get(ev["stage"], 1)
+-                self.notify(self.msg_zone(sym, tf, z, ev, pair), photo, prio=prio)
++                self.notify(self._with_intel(self.msg_zone(sym, tf, z, ev, pair), pair), photo, prio=prio)
+ 
+     def msg_zone(self, sym, tf, z, ev, pair):
+         d, bull, st = pair["digits"], z["dir"] == "bull", ev["stage"]
+@@ -706,7 +730,10 @@
+             self.warnings.append(f"Engine sempat tidak berjalan ±{gap_now:.0f} menit sebelum run ini "
+                                  f"(trigger sekarang: {trig}). Cek scheduler / watchdog Cloudflare.")
+         st = {
+-            "version": 20, "mode": config.SIGNAL_MODE, "updated_ts": self.now, "telegram_ok": self.tg_ok,
++            "version": 21, "mode": config.SIGNAL_MODE, "updated_ts": self.now, "telegram_ok": self.tg_ok,
++            "intel": {"enabled": config.INTEL_ENABLED, "mode": config.INTEL_MODE,
++                      "blocking": False, "version": 1,
++                      "description": "Live decision-support context; never gates legacy signals."},
+             "telegram": {"sent": getattr(self, "tg_sent", 0), "failed": getattr(self, "tg_fail", 0),
+                          "configured": telegram_notify.configured(),
+                          "pending_retry": len(self.p.get("tg_queue") or []),
+diff -ruN original_repo/engine/resample.py repo/engine/resample.py
+--- original_repo/engine/resample.py	2026-11-12 09:09:23.169251385 +0000
++++ repo/engine/resample.py	2026-11-12 09:06:47.604189967 +0000
+@@ -4,12 +4,31 @@
+                              W mulai Minggu 17:00 NY.
+ Crypto (Binance, sumber M1): UTC – D mulai 00:00 UTC, W mulai Senin 00:00 UTC (sama dengan Binance).
+ """
++from statistics import median
++
+ from session import session_start, week_start
+ 
+ TF_SEC = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "H4": 14400, "D": 86400, "W": 604800}
+ VOL_KEYS = ("v", "bv", "qv", "tc")
+ 
+ 
++def _expected_n(bars, tf, market):
++    """Expected number of the smallest represented source candles in one bucket.
++
++    ``n`` is deliberately kept in source-candle units.  This means an H1 bootstrap
++    candle carrying n=12 can safely be resampled to H4 (expected n=48), while an M1
++    crypto stream resampled to H4 expects n=240.  Forex W uses five trading days;
++    daily holidays remain observable as reduced coverage rather than being hidden.
++    """
++    diffs = [bars[i]["t"] - bars[i - 1]["t"] for i in range(1, len(bars))
++             if 0 < bars[i]["t"] - bars[i - 1]["t"] <= TF_SEC[tf]]
++    source_step = int(median(diffs)) if diffs else TF_SEC[tf]
++    units = [max(1, int(b.get("n", 1))) for b in bars[:200]]
++    unit_n = int(median(units)) if units else 1
++    duration = 5 * TF_SEC["D"] if market == "forex" and tf == "W" else TF_SEC[tf]
++    return max(unit_n, int(round(duration / max(source_step, 1))) * unit_n), source_step
++
++
+ def bucket_start(t, tf, market="forex"):
+     sec = TF_SEC[tf]
+     if tf in ("M1", "M5", "M15", "H1") or (market == "crypto" and tf in ("H4", "D")):
+@@ -26,6 +45,7 @@
+ 
+ 
+ def resample(bars, tf, market="forex"):
++    expected, source_step = _expected_n(bars, tf, market) if bars else (1, TF_SEC[tf])
+     out = {}
+     for b in bars:
+         k = bucket_start(b["t"], tf, market)
+@@ -43,7 +63,15 @@
+             for v in VOL_KEYS:
+                 if v in b:
+                     cur[v] = cur.get(v, 0) + b[v]
+-    return [out[k] for k in sorted(out)]
++    result = []
++    for k in sorted(out):
++        row = out[k]
++        row["expected_n"] = expected
++        row["coverage"] = round(min(1.0, row.get("n", 0) / max(expected, 1)), 4)
++        row["complete"] = row["coverage"] >= 0.9999
++        row["source_step"] = source_step
++        result.append(row)
++    return result
+ 
+ 
+ def upsert(store, new, covered_from=None):
+@@ -61,6 +89,11 @@
+             merged["l"] = min(ex["l"], b["l"])
+             merged["c"] = b["c"]
+             merged["n"] = max(ex.get("n", 0), b.get("n", 0))
++            if b.get("expected_n"):
++                merged["expected_n"] = b["expected_n"]
++                merged["source_step"] = b.get("source_step")
++                merged["coverage"] = round(min(1.0, merged["n"] / b["expected_n"]), 4)
++                merged["complete"] = merged["coverage"] >= 0.9999
+             for v in VOL_KEYS:
+                 if v in b:
+                     merged[v] = max(ex.get(v, 0), b[v])
+diff -ruN original_repo/tests/test_phase1_intel.py repo/tests/test_phase1_intel.py
+--- original_repo/tests/test_phase1_intel.py	1970-01-01 00:00:00.000000000 +0000
++++ repo/tests/test_phase1_intel.py	2026-11-12 09:04:22.392091910 +0000
+@@ -0,0 +1,69 @@
++import json
++import math
++import sys
++import unittest
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "engine"))
++
++from resample import resample  # noqa: E402
++from intel import confidence, mtf, regime  # noqa: E402
++
++
++class Phase1IntelTests(unittest.TestCase):
++    def test_resample_exposes_incomplete_coverage(self):
++        bars = [{"t": i * 300, "o": 100, "h": 101, "l": 99, "c": 100} for i in range(11)]
++        row = resample(bars, "H1", "forex")[0]
++        self.assertEqual(row["n"], 11)
++        self.assertEqual(row["expected_n"], 12)
++        self.assertFalse(row["complete"])
++        self.assertAlmostEqual(row["coverage"], 11 / 12, places=3)
++
++    def test_xau_uses_h4_until_daily_is_ready(self):
++        tfs = {"D": {"enough": False}, "H4": {"enough": True}, "H1": {"enough": True}, "M15": {"enough": True}}
++        requested, used, daily = mtf.select_timeframes("forex", tfs)
++        self.assertFalse(daily)
++        self.assertEqual(requested, ["H4", "H1", "M15"])
++        self.assertEqual(used[0], "H4")
++
++    def test_crypto_requests_daily_hierarchy(self):
++        tfs = {tf: {"enough": True} for tf in ("D", "H4", "H1", "M15")}
++        requested, used, daily = mtf.select_timeframes("crypto", tfs)
++        self.assertTrue(daily)
++        self.assertEqual(requested, ["D", "H4", "H1", "M15"])
++        self.assertEqual(used, requested)
++
++    def test_regime_is_json_serializable_and_explainable(self):
++        bars = []
++        price = 100.0
++        atr = []
++        for i in range(140):
++            o = price
++            c = o + 0.30 + 0.03 * math.sin(i)
++            bars.append({"t": i * 3600, "o": o, "h": c + 0.08, "l": o - 0.05, "c": c})
++            atr.append(0.43)
++            price = c
++        tfa = {"enough": True, "_bars": bars, "_atr14": atr, "swing_structure": "bull",
++               "internal_structure": "bull", "events": [{"type": "BOS", "dir": "bull", "displacement": True}]}
++        out = regime.classify("H4", tfa, 100)
++        self.assertIn(out["phase"], {"TREND", "EXPANSION"})
++        self.assertGreater(out["strength"], 50)
++        self.assertTrue(out["reasons"])
++        json.dumps(out)
++
++    def test_confidence_is_explicitly_non_blocking(self):
++        reg = {"direction": "bull", "phase": "TREND", "label": "BULLISH_TREND"}
++        hierarchy = {"bull_score": 82, "bear_score": 10, "conflicts": []}
++        liq = {"levels": [], "nearest_above": {"type": "PDH"}, "nearest_below": None}
++        fvg = {"active": [{"direction": "bull", "score": 80, "tf": "H1", "grade": "A", "id": "x",
++                            "factors": [{"name": "Active-leg location", "score": 8, "reason": "discount"}]}]}
++        data = {"score": 95, "status": "HEALTHY"}
++        out = confidence.build(reg, hierarchy, liq, fvg, data)
++        self.assertFalse(out["blocking"])
++        self.assertEqual(out["action"], "BUY_WATCH")
++        self.assertNotIn("probability", out["description"].lower())
++
++
++if __name__ == "__main__":
++    unittest.main()
