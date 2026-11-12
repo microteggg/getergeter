@@ -1,0 +1,43 @@
+name: Keepalive Trigger (cadangan Market Engine)
+# v19: cadangan PINTAR. Tiap 15 menit cek run Market Engine terakhir; hanya memicu engine bila
+#      tidak ada run yang sedang berjalan/antre DAN run terakhir dimulai > 12 menit lalu.
+#      Catatan: workflow ini juga memakai scheduler GitHub (bisa terlambat). Lapisan paling andal adalah
+#      Cloudflare Worker cron (worker/worker.js) – lihat PANDUAN_v19.md.
+# Set repository variable KEEPALIVE_OFF=1 untuk menonaktifkan cadangan ini.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/keepalive.yml"]
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+permissions:
+  actions: write
+  contents: read
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cek & picu Market Engine bila terlambat
+        if: ${{ vars.KEEPALIVE_OFF != '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh workflow enable engine.yml --repo "$REPO" 2>/dev/null || true
+          active=$(gh run list --repo "$REPO" --workflow engine.yml --limit 5 --json status \
+                   --jq '[.[] | select(.status=="queued" or .status=="in_progress" or .status=="waiting" or .status=="pending")] | length')
+          last=$(gh run list --repo "$REPO" --workflow engine.yml --limit 1 --json createdAt --jq '.[0].createdAt // ""')
+          now=$(date -u +%s); lastts=$( [ -n "$last" ] && date -u -d "$last" +%s || echo 0 )
+          age=$(( (now - lastts) / 60 ))
+          echo "Run aktif/antre: $active · run terakhir dimulai $age menit lalu"
+          if [ "$active" = "0" ] && [ "$age" -ge 12 ]; then
+            gh workflow run engine.yml --repo "$REPO" --ref main
+            echo "::notice::Market Engine dipicu oleh keepalive (terlambat $age menit)."
+          else
+            echo "Engine normal – tidak perlu dipicu."
+          fi

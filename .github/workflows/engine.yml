@@ -1,0 +1,125 @@
+name: Market Engine (5 menit)
+# v19: jadwal GitHub (cron) bersifat "best effort" – bisa terlambat/terlewat saat GitHub sibuk dan
+#      DIMATIKAN otomatis bila repo tidak ada aktivitas 60 hari. Karena itu engine juga dipicu dari luar
+#      (Cloudflare Worker cron -> workflow_dispatch, lihat worker/worker.js & PANDUAN_v19.md).
+#      Jadwal di sini tetap dipakai sebagai lapisan pertama.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["docs/**", "engine/**", "requirements.txt", ".github/workflows/engine.yml"]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: market-engine
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ambil data tersimpan (branch data)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: data
+          path: store
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Terapkan build hook dashboard
+        run: python engine/lazy_patch.py
+
+      - name: Jalankan engine
+        env:
+          REALMARKET_API_KEY: ${{ secrets.REALMARKET_API_KEY }}
+          # v19 FIX: sebelumnya token & chat id TIDAK diteruskan ke engine -> notif otomatis selalu gagal
+          # (hanya workflow "Tes Koneksi" yang punya secret ini, makanya tes manual berhasil).
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FOREX_SYMBOLS: XAUUSD
+          CRYPTO_SYMBOLS: ${{ vars.CRYPTO_SYMBOLS || 'BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,SOLUSDT,TRXUSDT,DOGEUSDT,ZECUSDT,LINKUSDT,ADAUSDT' }}
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
+          ALERT_TFS: ${{ vars.ALERT_TFS }}
+          ALERT_SIGNAL: ${{ vars.ALERT_SIGNAL }}
+          ALERT_WITH_CHART: ${{ vars.ALERT_WITH_CHART }}
+          LARGE_TRADE_USD: ${{ vars.LARGE_TRADE_USD }}
+          SKIP_WEEKEND: ${{ vars.SKIP_WEEKEND }}
+          # v19: mode & Auto Fibonacci & monitoring (kosong = default di config.py)
+          SIGNAL_MODE: ${{ vars.SIGNAL_MODE }}
+          FIB_PRIMARY_TF: ${{ vars.FIB_PRIMARY_TF }}
+          FIB_MIN_ATR: ${{ vars.FIB_MIN_ATR }}
+          MONITOR_SYMBOLS: ${{ vars.MONITOR_SYMBOLS }}
+          MONITOR_TF: ${{ vars.MONITOR_TF }}
+          MONITOR_NOTIFY: ${{ vars.MONITOR_NOTIFY }}
+          MONITOR_CONFLUENCE_MIN: ${{ vars.MONITOR_CONFLUENCE_MIN }}
+          # v21 Phase 1 Intelligence: live dashboard + Telegram + journal, non-blocking.
+          INTEL_ENABLED: ${{ vars.INTEL_ENABLED || 'true' }}
+          INTEL_MODE: ${{ vars.INTEL_MODE || 'live' }}
+        run: |
+          mkdir -p store/candles store/journal store/private_state _site
+          rm -rf store/.git
+          cp -r docs/. _site/
+          cd engine && python main.py --store ../store --site ../_site
+
+      - name: Cek hasil build dashboard
+        run: |
+          test -f _site/data/state.json || { echo "::error::state.json tidak dibuat engine"; exit 1; }
+          grep -q 'v21-phase1-intelligence' _site/app.js || { echo "::error::app.js bukan versi Phase 1 v21"; exit 1; }
+          test -f _site/app.js || { echo "::error::app.js tidak ditemukan"; exit 1; }
+          test -f _site/index.html || { echo "::error::index.html tidak ditemukan"; exit 1; }
+          grep -q 'v10-lazy' _site/app.js || { echo "::error::SMC v2 compatibility build belum terpasang"; exit 1; }
+          python - <<'PY'
+          import glob, json, time
+          with open("_site/data/state.json", encoding="utf-8") as f:
+              s = json.load(f)
+          age = (time.time() - s["updated_ts"]) / 60
+          chunks = glob.glob("_site/data/history/*.json")
+          print(f"updated_ts {s['updated_ts']} ({age:.1f} mnt lalu), pair: {list(s.get('pairs', {}))}")
+          print(f"history chunks: {len(chunks)}")
+          tg, run = s.get("telegram", {}), s.get("run", {})
+          print(f"mode {s.get('mode')} | telegram configured={tg.get('configured')} sent={tg.get('sent')} "
+                f"failed={tg.get('failed')} retry={tg.get('pending_retry')} | run {run.get('duration_sec')}s "
+                f"trigger={run.get('trigger')} jeda={run.get('gap_min')} mnt")
+          if tg.get("configured") is False:
+              print("::warning::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID kosong di engine - cek GitHub Secrets")
+          PY
+
+      - name: Simpan seluruh store ke branch data
+        run: |
+          cd store
+          git init -q -b data
+          git config user.name "market-engine"
+          git config user.email "market-engine@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Tidak ada perubahan pada store"
+          else
+            git commit -q -m "data $(date -u +%Y-%m-%dT%H:%MZ)"
+          fi
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
