@@ -67,13 +67,13 @@ jobs:
           SIGNAL_MODE: ${{ vars.SIGNAL_MODE }}
           FIB_PRIMARY_TF: ${{ vars.FIB_PRIMARY_TF }}
           FIB_MIN_ATR: ${{ vars.FIB_MIN_ATR }}
+          FIB_LOCK_RETRACE: ${{ vars.FIB_LOCK_RETRACE }}
+          INTEL_ENABLED: ${{ vars.INTEL_ENABLED || 'true' }}
+          INTEL_MODE: ${{ vars.INTEL_MODE || 'live' }}
           MONITOR_SYMBOLS: ${{ vars.MONITOR_SYMBOLS }}
           MONITOR_TF: ${{ vars.MONITOR_TF }}
           MONITOR_NOTIFY: ${{ vars.MONITOR_NOTIFY }}
           MONITOR_CONFLUENCE_MIN: ${{ vars.MONITOR_CONFLUENCE_MIN }}
-          # v21 Phase 1 Intelligence: live dashboard + Telegram + journal, non-blocking.
-          INTEL_ENABLED: ${{ vars.INTEL_ENABLED || 'true' }}
-          INTEL_MODE: ${{ vars.INTEL_MODE || 'live' }}
         run: |
           mkdir -p store/candles store/journal store/private_state _site
           rm -rf store/.git
@@ -83,7 +83,7 @@ jobs:
       - name: Cek hasil build dashboard
         run: |
           test -f _site/data/state.json || { echo "::error::state.json tidak dibuat engine"; exit 1; }
-          grep -q 'v21-phase1-intelligence' _site/app.js || { echo "::error::app.js bukan versi Phase 1 v21"; exit 1; }
+          grep -q 'v22-auto-fib-v2' _site/app.js || { echo "::error::app.js bukan versi v22 Auto Fib v2"; exit 1; }
           test -f _site/app.js || { echo "::error::app.js tidak ditemukan"; exit 1; }
           test -f _site/index.html || { echo "::error::index.html tidak ditemukan"; exit 1; }
           grep -q 'v10-lazy' _site/app.js || { echo "::error::SMC v2 compatibility build belum terpasang"; exit 1; }
