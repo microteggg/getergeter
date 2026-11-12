@@ -1,8 +1,0 @@
-.env
-__pycache__/
-*.py[cod]
-_site/
-_sim/
-
-# store/ WAJIB disimpan di Git/branch data.
-# Jangan tambahkan store/ ke .gitignore karena berisi candle, journal, dan private_state.
