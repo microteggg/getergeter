@@ -1,4 +1,4 @@
-/* Market Monitor v21 – Phase 1 Market Intelligence LIVE, explainable, non-blocking.
+/* Market Monitor v22-auto-fib-v2 – Auto Fib lifecycle + Phase 1 Intelligence.
    Market Monitor v20 – + HTF POI (FVG/OB H4 -> CHoCH M15 -> BOS M15) di panel Monitoring Events & chart.
    Market Monitor v19 – Auto Fibonacci (H4 utama tebal + Fib lokal tipis per TF), MODE MONITORING
    (sinyal BUY/SELL disembunyikan, panel Monitoring Events dari monitor_{PAIR}.json), preset tampilan Minimal,
@@ -206,31 +206,42 @@
       if (!dead) label(`${bull ? "BUY" : "SELL"} ${ZST[z.stage] || z.stage} · ${z.score}/${z.max_score || 10}${ZMD[z.model] || ""}`,
         Math.max(x0, 0) + 5, y0 + 7, bull ? C.zoneBuyL : C.zoneSellL, { size: 9, bold: true });
     });
-    // ---- v19: Auto Fibonacci – H4 utama (tebal oranye + zona 50–61.8) & Fib lokal TF aktif (tipis) ----
-    const fibDraw = (fb, primary) => {
+    // ---- v22: Auto Fib v2 lifecycle + extension + previous Fib + cluster ----
+    const fibDraw = (fb, primary, historical = false) => {
       if (!fb || !fb.levels) return;
+      if (!historical && fb.previous) fibDraw(fb.previous, primary, true); // exactly one previous Fib, dashed
       const col = primary ? C.fibMain : C.fibLocal;
       const xa = Math.max(0, xOf(idxOf(Math.min(fb.anchor100.t, fb.anchor0.t))) - S.sp / 2);
       if (xa > pw) return;
-      const dead = fb.status === "invalid";
-      ctx.save(); ctx.globalAlpha = dead ? 0.35 : 1;
-      if (primary && fb.gold) { const y0 = Y.y(fb.gold[1]), y1 = Y.y(fb.gold[0]); ctx.fillStyle = C.fibBand; ctx.fillRect(xa, y0, pw - xa, Math.max(1, y1 - y0)); }
+      const status = String(fb.status || "FORMING").toUpperCase(), dead = status === "INVALID";
+      ctx.save(); ctx.globalAlpha = historical ? 0.42 : dead ? 0.35 : status === "FORMING" ? 0.65 : 1;
+      if (primary && fb.gold && !historical) { const y0 = Y.y(fb.gold[1]), y1 = Y.y(fb.gold[0]); ctx.fillStyle = C.fibBand; ctx.fillRect(xa, y0, pw - xa, Math.max(1, y1 - y0)); }
+      (fb.clusters || []).forEach((z) => { if (historical) return; const y0 = Y.y(z.top), y1 = Y.y(z.bottom);
+        ctx.fillStyle = "rgba(124,58,237,.16)"; ctx.fillRect(xa, y0 - 1, pw - xa, Math.max(2, y1 - y0 + 2));
+        label(z.label || "Fib cluster", xa + 6, y0 - 5, C.conf, { size: 9, bold: true, bg: "rgba(255,255,255,.78)" }); });
       const lab = [];
       fb.levels.forEach((lv) => {
-        if (lv.r === 0.236) return;                                   // minimalis: 23.6 tidak digambar
         const y = Y.y(lv.price), key = lv.r === 0.5 || lv.r === 0.618;
-        hline(y, xa, pw, col, primary ? [] : [4, 3], primary ? (key ? 1.5 : 1) : 0.8);
+        const dash = historical ? [6, 5] : status === "FORMING" ? [3, 3] : primary ? [] : [4, 3];
+        hline(y, xa, pw, col, dash, primary ? (key ? 1.5 : 1) : 0.8);
         const txt = `${fb.tf} ${+(lv.r * 100).toFixed(1)}%` + (primary ? ` (${fx(lv.price, D.digits)})` : "");
-        if (primary) label(txt, Math.max(xa, 0) + 6, y - 7, col, { size: 10, bold: key, bg: "rgba(255,255,255,.75)" });
+        if (primary && !historical) label(txt, Math.max(xa, 0) + 6, y - 7, col, { size: 10, bold: key, bg: "rgba(255,255,255,.75)" });
         else lab.push([txt, y]);
       });
-      if (!primary) {
+      if (!historical && status === "EXTENDED") (fb.extensions || []).forEach((lv) => {
+        const y = Y.y(lv.price); hline(y, xa, pw, col, [7, 3], lv.x === 1.618 ? 1.35 : 0.9);
+        label(`${fb.tf} EXT ${lv.notation} (${fx(lv.price, D.digits)})`, primary ? xa + 6 : pw - 6, y - 6, col,
+          { size: primary ? 9 : 8, bold: lv.x === 1.618, align: primary ? "left" : "right", bg: "rgba(255,255,255,.72)" });
+      });
+      if (!primary || historical) {
         const x0 = xOf(idxOf(fb.anchor100.t)), x1 = xOf(idxOf(fb.anchor0.t));
         ctx.save(); ctx.strokeStyle = col; ctx.setLineDash([2, 3]); ctx.lineWidth = 0.9; ctx.beginPath();
         ctx.moveTo(x0, Y.y(fb.anchor100.price)); ctx.lineTo(x1, Y.y(fb.anchor0.price)); ctx.stroke(); ctx.restore();
         const lx = x1 + 8 < pw - 70 ? x1 + 8 : pw - 6, la = x1 + 8 < pw - 70 ? "left" : "right";
         lab.forEach(([t, y]) => label(t, lx, y - 6, col, { size: 9, align: la }));
       }
+      if (!historical) label(`${fb.tf} ${status} · 1.0 @ ${fx(fb.anchor0.price, D.digits)}`,
+        Math.min(pw - 6, xa + 8), Y.y(fb.anchor0.price) - 18, col, { size: 10, bold: true, bg: "rgba(255,255,255,.82)" });
       ctx.restore();
     };
     if (S.show.fibH4) fibDraw(D.fib_primary || (P() && P().fib_primary), true);
@@ -765,8 +776,8 @@
     if (p.book) rows.push(["Book ±0,5%", "bid " + p.book["imb_0.5"].toFixed(0) + "%", p.book["imb_0.5"] >= 50 ? "up" : "dn"]);
     rows.push(["Lokasi", (a.premium_discount || "-").replace("_", " "), ""]);
     const fp = p.fib_primary, fl = a.fib;
-    rows.push(["Fib " + (fp ? fp.tf : "H4"), fp ? `${fp.dir === "bull" ? "▲" : "▼"} ${fp.retrace ?? "-"}%` : "-", fp ? cls(fp.dir) : ""]);
-    if (S.tf !== (fp && fp.tf)) rows.push(["Fib " + S.tf, fl ? `${fl.dir === "bull" ? "▲" : "▼"} ${fl.retrace ?? "-"}%` : "-", fl ? cls(fl.dir) : ""]);
+    rows.push(["Fib " + (fp ? fp.tf : "H4"), fp ? `${fp.dir === "bull" ? "▲" : "▼"} ${fp.status || "-"} · ${fp.retrace ?? "-"}%` : "-", fp ? cls(fp.dir) : ""]);
+    if (S.tf !== (fp && fp.tf)) rows.push(["Fib " + S.tf, fl ? `${fl.dir === "bull" ? "▲" : "▼"} ${fl.status || "-"} · ${fl.retrace ?? "-"}%` : "-", fl ? cls(fl.dir) : ""]);
     if (MONITOR()) {
       const le = p.monitor && p.monitor.last && p.monitor.last.slice(-1)[0];
       rows.push(["Mode", "MONITOR", ""]);
@@ -871,48 +882,26 @@
   function fibCard(fb, d, local) {
     if (!fb) return `<div class="fibcard${local ? " loc" : ""}"><div class="t">Fib ${local ? "lokal" : "utama"}</div><span class="muted">Belum ada impuls valid (BOS/CHoCH).</span></div>`;
     const bull = fb.dir === "bull", lv = (r) => (fb.levels.find((x) => x.r === r) || {}).price;
-    return `<div class="fibcard${local ? " loc" : ""}"><div class="t">Fib ${esc(fb.tf)} ${local ? "lokal" : "utama"} · <span class="${cls(fb.dir)}">${bull ? "Bullish" : "Bearish"}</span> <span class="muted">(${esc(fb.scope)}${fb.status === "invalid" ? ", INVALID" : ""}${fb.extending ? ", 0% masih berjalan" : ""})</span></div>
-      <div class="fibgrid"><span>100% (awal)</span><b>${fx(fb.anchor100.price, d)}</b><span>0% (ujung)</span><b>${fx(fb.anchor0.price, d)}</b>
+    const status = String(fb.status || "FORMING").toUpperCase();
+    const ext = status === "EXTENDED" ? `<div class="muted">Target extension: ${(fb.extensions || []).map((x) => `${esc(x.notation)} ${fx(x.price, d)}`).join(" · ")}</div>` : "";
+    const cluster = (fb.clusters || []).length ? `<div class="muted"><b>Fib cluster:</b> ${(fb.clusters || []).map((z) => esc(z.label)).join(" · ")}</div>` : "";
+    return `<div class="fibcard${local ? " loc" : ""}"><div class="t">Fib ${esc(fb.tf)} ${local ? "lokal" : "utama"} · <span class="${cls(fb.dir)}">${bull ? "Bullish" : "Bearish"}</span> <b>${esc(status)}</b> <span class="muted">(${esc(fb.scope)})</span></div>
+      <div class="fibgrid"><span>100% (awal)</span><b>${fx(fb.anchor100.price, d)}</b><span>1.0 / 0% (ujung)</span><b>${fx(fb.anchor0.price, d)}</b>
       <span>38.2%</span><b>${fx(lv(0.382), d)}</b><span>78.6%</span><b>${fx(lv(0.786), d)}</b>
       <span>Zona 50–61.8</span><b class="g">${fx(fb.gold[0], d)} – ${fx(fb.gold[1], d)}</b><span>Retrace</span><b>${fb.retrace ?? "-"}% <span class="muted">${esc(fb.zone || "")}</span></b></div>
-      <div class="muted">Anchor dari ${esc(fb.event.label)} ${wib(fb.event.t, "full")} · ${bull ? "100% = swing low → 0% = swing high" : "100% = swing high → 0% = swing low"}</div></div>`;
+      ${ext}${cluster}<div class="muted">Anchor dari ${esc(fb.event.label)} ${wib(fb.event.t, "full")} · ${fb.previous ? "Fib sebelumnya tetap ditampilkan putus-putus · " : ""}${bull ? "100% = swing low → 1.0 = swing high" : "100% = swing high → 1.0 = swing low"}</div></div>`;
   }
 
-  // ======================= v21: PHASE 1 MARKET INTELLIGENCE =======================
-  const scoreTone = (n) => n >= 80 ? "up" : n >= 60 ? "yl" : n < 40 ? "dn" : "";
-  const dirText = (d) => d === "bull" ? "▲ Bullish" : d === "bear" ? "▼ Bearish" : "◌ Netral/Mixed";
   function intelPanel() {
-    const el = $("p-intel"); if (!el || !S.state) return;
-    const p = P(), I = p && p.intel, cfg = S.state.intel || {};
-    if (!cfg.enabled) {
-      el.innerHTML = `<h3>Market Intelligence</h3><p class="muted">INTEL_ENABLED=False — kill switch aktif; engine v20 tetap berjalan.</p>`;
-      return;
-    }
-    if (!I || I.error) {
-      el.innerHTML = `<h3>Market Intelligence · ${esc((cfg.mode || "live").toUpperCase())}</h3><div class="warn err">Intel belum tersedia${I && I.error ? ": " + esc(I.error) : " (menunggu run engine)."} Legacy signal tidak diblokir.</div>`;
-      return;
-    }
-    const r = I.regime || {}, m = I.mtf || {}, q = I.data_quality || {}, c = I.confidence || {};
-    const fqg = I.fvg_quality || {}, best = fqg.best, liq = I.liquidity || {}, d = p.digits;
-    const comp = (c.components || []).map((x) => `<div class="intel-factor"><div><b>${esc(x.name)}</b><span>${x.score}/${x.max}</span></div><div class="ibar"><i style="width:${Math.max(0, Math.min(100, 100 * x.score / (x.max || 1)))}%"></i></div><small>${esc(x.reason)}</small></div>`).join("");
-    const penalties = (c.penalties || []).map((x) => `<li><b>${x.value}</b> ${esc(x.name)} — ${esc(x.reason)}</li>`).join("");
-    const mtfRows = (m.states || []).map((x) => `<tr><td><b>${esc(x.tf)}</b></td><td class="${cls(x.direction)}">${esc(x.available ? dirText(x.direction) : "Data kurang")}</td><td>${Math.round((x.conviction || 0) * 100)}%</td><td>${esc(x.structure || "-")}</td><td>${esc(x.regime || "-")}</td></tr>`).join("");
-    const levels = (liq.levels || []).filter((x) => ["PDH", "PDL", "PWH", "PWL", "ASIA_HIGH", "ASIA_LOW", "LONDON_HIGH", "LONDON_LOW", "NEW_YORK_HIGH", "NEW_YORK_LOW"].includes(x.type)).slice(0, 12);
-    const liqRows = levels.map((x) => `<tr><td><b>${esc(x.type)}</b></td><td>${fx(x.price, d)}</td><td><span class="liq-st ${esc(x.status)}">${esc(x.status)}</span></td><td>${x.distance_atr == null ? "-" : x.distance_atr + " ATR"}</td><td class="muted">${esc(x.description || "")}</td></tr>`).join("");
-    const fvgFactors = best ? best.factors.map((x) => `<li><b>${x.score}/${x.max}</b> ${esc(x.name)} — ${esc(x.reason)}</li>`).join("") : "";
-    const glossary = I.glossary || {};
-    el.innerHTML = `<div class="intel-head"><div><h3>Market Intelligence · ${esc((I.mode || "live").toUpperCase())}</h3><div class="muted">${esc(I.notice || "")}</div></div><span class="intel-live">LIVE · NON-BLOCKING</span></div>
-      <div class="intel-grid">
-        <article class="intel-card"><small>Market Regime · ${esc(I.top_tf)}</small><strong class="${cls(r.direction)}">${esc((r.label || "-").replaceAll("_", " "))}</strong><div class="score ${scoreTone(r.strength || 0)}">${r.strength ?? 0}<em>/100</em></div><p>${esc(r.description || "")}</p><ul>${(r.reasons || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul></article>
-        <article class="intel-card"><small>MTF Structure</small><strong class="${cls(m.bias)}">${esc(dirText(m.bias))}</strong><div class="score ${scoreTone(m.alignment || 0)}">${m.alignment ?? 0}<em>/100</em></div><p>${esc(m.description || "")}</p><p class="muted">Status ${esc(m.label || "-")} · bull ${m.bull_score ?? 0} · bear ${m.bear_score ?? 0}${(m.conflicts || []).length ? " · konflik " + esc(m.conflicts.join(", ")) : ""}</p></article>
-        <article class="intel-card confidence"><small>Transparent Confidence</small><strong class="${cls(c.direction)}">${esc(c.action || "-")}</strong><div class="score ${scoreTone(c.score || 0)}">${c.score ?? 0}<em>/100</em></div><p>${esc(c.description || "")}</p><p class="muted">Bull ${c.bull ?? 0} · Bear ${c.bear ?? 0} · spread ${c.spread ?? 0}</p></article>
-        <article class="intel-card"><small>Data Health</small><strong class="${q.status === "HEALTHY" ? "up" : q.status === "POOR" ? "dn" : "yl"}">${esc(q.status || "-")}</strong><div class="score ${scoreTone(q.score || 0)}">${q.score ?? 0}<em>/100</em></div><p>${esc(q.description || "")}</p><p class="muted">Gap ${q.gap_count || 0} · missing ${q.missing_source_bars || 0} · duplicate ${q.duplicates || 0} · resample incomplete ${q.resample_incomplete || 0}/${q.resample_measured || 0}</p></article>
-      </div>
-      <div class="intel-cols"><div><h4>Confidence breakdown</h4>${comp || `<p class="muted">Belum ada komponen.</p>`}${penalties ? `<h4>Penalties</h4><ul class="intel-list penalty">${penalties}</ul>` : ""}</div>
-      <div><h4>FVG terbaik</h4>${best ? `<div class="fvg-best"><b class="${cls(best.direction)}">${esc(best.tf)} ${esc(dirText(best.direction))} · Grade ${esc(best.grade)} · ${best.score}/100</b><span>${fx(best.bottom, d)} – ${fx(best.top, d)} · umur ${best.age_bars} candle · mitigasi ${best.mitigation_pct}%</span></div><ul class="intel-list">${fvgFactors}</ul><p class="muted">${esc(best.description || "")}</p>` : `<p class="muted">Tidak ada FVG aktif pada hierarchy yang siap.</p>`}</div></div>
-      <h4>Hierarchy</h4><div class="tbl-wrap"><table class="tbl intel-table"><thead><tr><th>TF</th><th>Arah</th><th>Conviction</th><th>State</th><th>Regime</th></tr></thead><tbody>${mtfRows}</tbody></table></div>
-      <h4>Liquidity Map <span class="muted">— price-level proxy, bukan resting order book</span></h4><div class="tbl-wrap"><table class="tbl intel-table"><thead><tr><th>Level</th><th>Harga</th><th>Status</th><th>Jarak</th><th>Arti</th></tr></thead><tbody>${liqRows || `<tr><td colspan="5" class="muted">Level periode/sesi belum cukup.</td></tr>`}</tbody></table></div>
-      <details class="intel-help"><summary>Arti state/regime</summary><div>${Object.entries(glossary).map(([k, v]) => `<p><b>${esc(k.replaceAll("_", " "))}</b> — ${esc(v)}</p>`).join("")}</div></details>`;
+    const p = P(), el = $("p-intel"), x = p.intel;
+    if (!x) { el.innerHTML = `<h3>Market Intelligence</h3><p class="muted">Intel nonaktif atau belum tersedia.</p>`; return; }
+    const c = x.confidence || {}, m = x.mtf || {}, r = (x.regime || {})[x.primary_tf] || {}, h = x.data_health || {};
+    const liq = (x.liquidity || []).map((z) => `<li>${esc(z.name)} ${fx(z.price, p.digits)} · <b>${esc(z.status)}</b> <span class="muted">(${esc(z.kind)})</span></li>`).join("");
+    el.innerHTML = `<h3>Market Intelligence · ${esc(x.primary_tf || "-")}</h3>
+      <div class="kv"><div><small>Regime</small><b>${esc(r.state || "-")}</b></div><div><small>MTF</small><b>${esc(m.direction || "-")} ${m.alignment ?? 0}%</b></div>
+      <div><small>Confidence</small><b>${c.value ?? 0}/100</b></div><div><small>Decision</small><b>${esc(c.decision || "NO_EDGE")}</b></div></div>
+      <p class="muted">Confidence adalah context score, bukan probabilitas kemenangan. Data coverage ${(100 * (h.coverage || 0)).toFixed(1)}% · ${h.complete ? "complete" : "incomplete"}.</p>
+      ${liq ? `<h4>Liquidity map (price-level proxy)</h4><ul class="list">${liq}</ul>` : ""}`;
   }
   function panels() {
     const st = S.state, p = P(), d = p.digits, ov = p.overall, s = ov.setup;
@@ -1133,7 +1122,7 @@
   // state.json dicek tiap 45 detik (cache dilewati). Chart & panel hanya diperbarui bila
   // updated_ts berubah -> hemat & posisi zoom/geser chart tetap. Tab tersembunyi = jeda.
   // v10-lazy compatibility marker is kept for the existing GitHub Actions check.
-  const APP_VERSION = "v21-phase1-intelligence";
+  const APP_VERSION = "v20-htf-poi";
   const POLL_MS = 45 * 1000;
   let lastTs = 0, polling = false;
   async function load(force) {
