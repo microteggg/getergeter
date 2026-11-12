@@ -1,0 +1,1604 @@
+diff -ruN baseline/.github/workflows/engine.yml package/getergeter-autofib-v2-v22/.github/workflows/engine.yml
+--- baseline/.github/workflows/engine.yml	2026-11-12 10:07:30.607434855 +0000
++++ package/getergeter-autofib-v2-v22/.github/workflows/engine.yml	2026-11-12 10:03:19.211247689 +0000
+@@ -67,6 +67,9 @@
+           SIGNAL_MODE: ${{ vars.SIGNAL_MODE }}
+           FIB_PRIMARY_TF: ${{ vars.FIB_PRIMARY_TF }}
+           FIB_MIN_ATR: ${{ vars.FIB_MIN_ATR }}
++          FIB_LOCK_RETRACE: ${{ vars.FIB_LOCK_RETRACE }}
++          INTEL_ENABLED: ${{ vars.INTEL_ENABLED || 'true' }}
++          INTEL_MODE: ${{ vars.INTEL_MODE || 'live' }}
+           MONITOR_SYMBOLS: ${{ vars.MONITOR_SYMBOLS }}
+           MONITOR_TF: ${{ vars.MONITOR_TF }}
+           MONITOR_NOTIFY: ${{ vars.MONITOR_NOTIFY }}
+@@ -80,7 +83,7 @@
+       - name: Cek hasil build dashboard
+         run: |
+           test -f _site/data/state.json || { echo "::error::state.json tidak dibuat engine"; exit 1; }
+-          grep -q 'v19-fib-monitor' _site/app.js || echo "::warning::app.js bukan versi v19"
++          grep -q 'v22-auto-fib-v2' _site/app.js || { echo "::error::app.js bukan versi v22 Auto Fib v2"; exit 1; }
+           test -f _site/app.js || { echo "::error::app.js tidak ditemukan"; exit 1; }
+           test -f _site/index.html || { echo "::error::index.html tidak ditemukan"; exit 1; }
+           grep -q 'v10-lazy' _site/app.js || { echo "::error::SMC v2 compatibility build belum terpasang"; exit 1; }
+diff -ruN baseline/.gitignore package/getergeter-autofib-v2-v22/.gitignore
+--- baseline/.gitignore	2026-11-12 10:07:30.611434864 +0000
++++ package/getergeter-autofib-v2-v22/.gitignore	2026-11-12 10:07:58.210344215 +0000
+@@ -3,6 +3,8 @@
+ *.py[cod]
+ _site/
+ _sim/
++_sim*/
++simulation.log
+ 
+ # store/ WAJIB disimpan di Git/branch data.
+ # Jangan tambahkan store/ ke .gitignore karena berisi candle, journal, dan private_state.
+diff -ruN baseline/AUTO_FIB_V2.md package/getergeter-autofib-v2-v22/AUTO_FIB_V2.md
+--- baseline/AUTO_FIB_V2.md	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/AUTO_FIB_V2.md	2026-11-12 10:06:58.757552033 +0000
+@@ -0,0 +1,57 @@
++# Auto Fib v2 — Lifecycle specification
++
++## Status
++
++- **FORMING** — structural swing leg exists, but its endpoint is not locked. The endpoint may follow a new extreme.
++- **LOCKED** — endpoint pivot has been confirmed after `k` closed candles, pullback reached at least 23.6% by wick, and no candle closed through 100%.
++- **EXTENDED** — a candle closed through old 1.0. Anchors stay frozen and extension targets are enabled.
++- **REPLACED** — the old Fib became the single dashed “previous Fib” after a complete HL→HH or LH→LL continuation.
++- **INVALID** — a candle closed through 100%. Wick-only sweeps do not invalidate it.
++
++## Replacement gate
++
++A same-direction Fib replaces the current Fib only when all conditions are complete:
++
++1. the current Fib is LOCKED;
++2. a post-lock HL (bull) or LH (bear) is recorded;
++3. a candle **closes** beyond old 1.0;
++4. the new HH/LL endpoint is confirmed after `k` closed candles;
++5. the new leg pulls back at least 23.6%; and
++6. the new leg has not closed through its own origin.
++
++Until then, the old Fib remains primary and price beyond 1.0 is interpreted as extension.
++
++## Levels
++
++Retracement: 0%, 23.6%, 38.2%, 50%, 61.8%, 78.6%, 100%.
++
++Approved extension notation: **1.236, 1.382, 1.618, 2.236, 2.618**. Here 1.0 is the impulse endpoint.
++
++## Data and repaint controls
++
++- Each timeframe runs an independent lifecycle.
++- Only closed candles are processed.
++- Endpoint confirmation is available at `pivot_index + k`; no future candle is read early.
++- 1.0 break and 100% invalidation use close.
++- Pullback depth uses closed-candle high/low, so wick depth counts.
++- Internal Fib never replaces the primary swing Fib; `FIB_FALLBACK_INTERNAL` is forced off.
++
++## Persistence and presentation
++
++- Current Fib and exactly one previous Fib are included in chart JSON.
++- Previous Fib is drawn thinner/dashed on dashboard and Telegram PNG charts.
++- Full lifecycle history is merged idempotently into `store/fib/{SYMBOL}.json` and exported as `_site/data/fib_history_{SYMBOL}.json`.
++- Overlap between active and previous golden zones, or an old Fib level inside the active golden zone, produces a `Fib cluster` annotation.
++- Monitor events: `FIB_LOCKED`, `FIB_EXTENDED`, `FIB_REPLACED`, and `FIB_INVALID`, each with a human-readable reason.
++
++## Configuration
++
++```text
++FIB_ENABLED=true
++FIB_PRIMARY_TF=H4
++FIB_MIN_ATR=1.0
++FIB_LOCK_RETRACE=0.236
++FIB_HISTORY_LIMIT=10000
++```
++
++`FIB_LOCK_RETRACE` is a decimal ratio, not a percentage string.
+diff -ruN baseline/AUTO_FIB_V2.patch package/getergeter-autofib-v2-v22/AUTO_FIB_V2.patch
+--- baseline/AUTO_FIB_V2.patch	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/AUTO_FIB_V2.patch	2026-11-12 10:08:41.987300320 +0000
+@@ -0,0 +1,95 @@
++diff -ruN baseline/.github/workflows/engine.yml package/getergeter-autofib-v2-v22/.github/workflows/engine.yml
++--- baseline/.github/workflows/engine.yml	2026-11-12 10:07:30.607434855 +0000
+++++ package/getergeter-autofib-v2-v22/.github/workflows/engine.yml	2026-11-12 10:03:19.211247689 +0000
++@@ -67,6 +67,9 @@
++           SIGNAL_MODE: ${{ vars.SIGNAL_MODE }}
++           FIB_PRIMARY_TF: ${{ vars.FIB_PRIMARY_TF }}
++           FIB_MIN_ATR: ${{ vars.FIB_MIN_ATR }}
+++          FIB_LOCK_RETRACE: ${{ vars.FIB_LOCK_RETRACE }}
+++          INTEL_ENABLED: ${{ vars.INTEL_ENABLED || 'true' }}
+++          INTEL_MODE: ${{ vars.INTEL_MODE || 'live' }}
++           MONITOR_SYMBOLS: ${{ vars.MONITOR_SYMBOLS }}
++           MONITOR_TF: ${{ vars.MONITOR_TF }}
++           MONITOR_NOTIFY: ${{ vars.MONITOR_NOTIFY }}
++@@ -80,7 +83,7 @@
++       - name: Cek hasil build dashboard
++         run: |
++           test -f _site/data/state.json || { echo "::error::state.json tidak dibuat engine"; exit 1; }
++-          grep -q 'v19-fib-monitor' _site/app.js || echo "::warning::app.js bukan versi v19"
+++          grep -q 'v22-auto-fib-v2' _site/app.js || { echo "::error::app.js bukan versi v22 Auto Fib v2"; exit 1; }
++           test -f _site/app.js || { echo "::error::app.js tidak ditemukan"; exit 1; }
++           test -f _site/index.html || { echo "::error::index.html tidak ditemukan"; exit 1; }
++           grep -q 'v10-lazy' _site/app.js || { echo "::error::SMC v2 compatibility build belum terpasang"; exit 1; }
++diff -ruN baseline/.gitignore package/getergeter-autofib-v2-v22/.gitignore
++--- baseline/.gitignore	2026-11-12 10:07:30.611434864 +0000
+++++ package/getergeter-autofib-v2-v22/.gitignore	2026-11-12 10:07:58.210344215 +0000
++@@ -3,6 +3,8 @@
++ *.py[cod]
++ _site/
++ _sim/
+++_sim*/
+++simulation.log
++ 
++ # store/ WAJIB disimpan di Git/branch data.
++ # Jangan tambahkan store/ ke .gitignore karena berisi candle, journal, dan private_state.
++diff -ruN baseline/AUTO_FIB_V2.md package/getergeter-autofib-v2-v22/AUTO_FIB_V2.md
++--- baseline/AUTO_FIB_V2.md	1970-01-01 00:00:00.000000000 +0000
+++++ package/getergeter-autofib-v2-v22/AUTO_FIB_V2.md	2026-11-12 10:06:58.757552033 +0000
++@@ -0,0 +1,57 @@
+++# Auto Fib v2 — Lifecycle specification
+++
+++## Status
+++
+++- **FORMING** — structural swing leg exists, but its endpoint is not locked. The endpoint may follow a new extreme.
+++- **LOCKED** — endpoint pivot has been confirmed after `k` closed candles, pullback reached at least 23.6% by wick, and no candle closed through 100%.
+++- **EXTENDED** — a candle closed through old 1.0. Anchors stay frozen and extension targets are enabled.
+++- **REPLACED** — the old Fib became the single dashed “previous Fib” after a complete HL→HH or LH→LL continuation.
+++- **INVALID** — a candle closed through 100%. Wick-only sweeps do not invalidate it.
+++
+++## Replacement gate
+++
+++A same-direction Fib replaces the current Fib only when all conditions are complete:
+++
+++1. the current Fib is LOCKED;
+++2. a post-lock HL (bull) or LH (bear) is recorded;
+++3. a candle **closes** beyond old 1.0;
+++4. the new HH/LL endpoint is confirmed after `k` closed candles;
+++5. the new leg pulls back at least 23.6%; and
+++6. the new leg has not closed through its own origin.
+++
+++Until then, the old Fib remains primary and price beyond 1.0 is interpreted as extension.
+++
+++## Levels
+++
+++Retracement: 0%, 23.6%, 38.2%, 50%, 61.8%, 78.6%, 100%.
+++
+++Approved extension notation: **1.236, 1.382, 1.618, 2.236, 2.618**. Here 1.0 is the impulse endpoint.
+++
+++## Data and repaint controls
+++
+++- Each timeframe runs an independent lifecycle.
+++- Only closed candles are processed.
+++- Endpoint confirmation is available at `pivot_index + k`; no future candle is read early.
+++- 1.0 break and 100% invalidation use close.
+++- Pullback depth uses closed-candle high/low, so wick depth counts.
+++- Internal Fib never replaces the primary swing Fib; `FIB_FALLBACK_INTERNAL` is forced off.
+++
+++## Persistence and presentation
+++
+++- Current Fib and exactly one previous Fib are included in chart JSON.
+++- Previous Fib is drawn thinner/dashed on dashboard and Telegram PNG charts.
+++- Full lifecycle history is merged idempotently into `store/fib/{SYMBOL}.json` and exported as `_site/data/fib_history_{SYMBOL}.json`.
+++- Overlap between active and previous golden zones, or an old Fib level inside the active golden zone, produces a `Fib cluster` annotation.
+++- Monitor events: `FIB_LOCKED`, `FIB_EXTENDED`, `FIB_REPLACED`, and `FIB_INVALID`, each with a human-readable reason.
+++
+++## Configuration
+++
+++```text
+++FIB_ENABLED=true
+++FIB_PRIMARY_TF=H4
+++FIB_MIN_ATR=1.0
+++FIB_LOCK_RETRACE=0.236
+++FIB_HISTORY_LIMIT=10000
+++```
+++
+++`FIB_LOCK_RETRACE` is a decimal ratio, not a percentage string.
+diff -ruN baseline/BUILD_INFO.json package/getergeter-autofib-v2-v22/BUILD_INFO.json
+--- baseline/BUILD_INFO.json	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/BUILD_INFO.json	2026-11-12 10:08:34.505317015 +0000
+@@ -0,0 +1,14 @@
++{
++  "package": "getergeter-phase1-v21-autofib-v2-v22",
++  "version": "v22-auto-fib-v2",
++  "built_at": "2026-11-12T16:51:20+07:00",
++  "base": "Phase 1 v21 live plus supplied repository source snapshot",
++  "checks": {
++    "python_compile": "PASS",
++    "javascript_syntax": "PASS",
++    "workflow_yaml": "PASS",
++    "unit_tests": "8/8 PASS",
++    "offline_simulation": "PASS",
++    "strict_json": "PASS"
++  }
++}
+diff -ruN baseline/INSTALL_AUTO_FIB_V2.md package/getergeter-autofib-v2-v22/INSTALL_AUTO_FIB_V2.md
+--- baseline/INSTALL_AUTO_FIB_V2.md	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/INSTALL_AUTO_FIB_V2.md	2026-11-12 10:07:20.693440477 +0000
+@@ -0,0 +1,28 @@
++# Install / test
++
++1. Extract the ZIP.
++2. Copy the contents of `getergeter-autofib-v2-v22` to the repository root, preserving paths.
++3. Commit and manually run **Market Engine** once.
++4. Check:
++   - dashboard Fib status labels and extension lines;
++   - dashed previous Fib and Fib-cluster annotations;
++   - Monitoring Events for FIB LOCKED/EXTENDED/REPLACED/INVALID;
++   - Telegram chart PNG;
++   - `store/fib/{SYMBOL}.json` on the data branch;
++   - `_site/data/fib_history_{SYMBOL}.json` and `intel_{SYMBOL}.json`.
++
++Suggested repository variables:
++
++```text
++FIB_ENABLED=true
++FIB_PRIMARY_TF=H4
++FIB_MIN_ATR=1.0
++FIB_LOCK_RETRACE=0.236
++FIB_HISTORY_LIMIT=10000
++INTEL_ENABLED=true
++INTEL_MODE=live
++```
++
++Rollback: restore the previous commit. `FIB_ENABLED=false` hides/disables Fib calculation; `INTEL_ENABLED=false` independently disables Market Intelligence.
++
++Do not commit `.env`, Telegram tokens, API keys, runtime `_site/`, or local simulation folders.
+diff -ruN baseline/MANIFEST_AUTO_FIB_V2.md package/getergeter-autofib-v2-v22/MANIFEST_AUTO_FIB_V2.md
+--- baseline/MANIFEST_AUTO_FIB_V2.md	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/MANIFEST_AUTO_FIB_V2.md	2026-11-12 10:08:08.006310833 +0000
+@@ -0,0 +1,34 @@
++# Manifest — getergeter Auto Fib v2 v22
++
++## New files
++
++- `engine/fib_journal.py`
++- `engine/intel/__init__.py`
++- `engine/intel/regime.py`
++- `engine/intel/mtf.py`
++- `engine/intel/liqmap.py`
++- `engine/intel/fvg_quality.py`
++- `engine/intel/confidence.py`
++- `tests/test_autofib_v2.py`
++- `AUTO_FIB_V2.md`
++- `PHASE1_MARKET_INTELLIGENCE.md`
++- `VERIFICATION_AUTO_FIB_V2.md`
++- `INSTALL_AUTO_FIB_V2.md`
++- `AUTO_FIB_V2.patch`
++
++## Revised integration files
++
++- `engine/fibo.py` — complete v2 lifecycle state machine.
++- `engine/analysis.py` — lifecycle history handoff.
++- `engine/config.py` — v22 settings; internal fallback forced off.
++- `engine/main.py` — Fib journal, Phase 1 intel, site/state outputs.
++- `engine/monitor.py` — LOCKED/EXTENDED/REPLACED/INVALID events and descriptions.
++- `engine/charts.py` — Telegram PNG lifecycle, extensions, previous Fib, clusters.
++- `engine/messages.py` — Telegram text status and extension notation.
++- `engine/resample.py` — data-integrity metadata.
++- `docs/app.js` — dashboard chart and panels.
++- `docs/index.html` — Market Intelligence panel slot and v22 marker.
++- `.github/workflows/engine.yml` — variables and build-marker validation.
++- `.gitignore` — local test output exclusions.
++
++All remaining files are preserved from the supplied source snapshot to make the ZIP directly copyable to the repository root.
+diff -ruN baseline/PHASE1_MARKET_INTELLIGENCE.md package/getergeter-autofib-v2-v22/PHASE1_MARKET_INTELLIGENCE.md
+--- baseline/PHASE1_MARKET_INTELLIGENCE.md	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/PHASE1_MARKET_INTELLIGENCE.md	2026-11-12 10:07:05.796511264 +0000
+@@ -0,0 +1,21 @@
++# Phase 1 Market Intelligence v21 (included)
++
++This package preserves the v21 live, non-blocking intelligence layer and adds Auto Fib v2 above it.
++
++Included modules:
++
++- `engine/intel/regime.py` — trend, expansion, range, compression, and transition from structure, efficiency, ATR percentile, and range expansion.
++- `engine/intel/mtf.py` — D/H4/H1/M15 hierarchy; XAUUSD falls back to H4 when D is insufficient.
++- `engine/intel/liqmap.py` — PDH/PDL and PWH/PWL price-level proxies with INTACT/SWEPT/BROKEN lifecycle.
++- `engine/intel/fvg_quality.py` — explainable FVG score components.
++- `engine/intel/confidence.py` — transparent context score with separate penalties; it is not represented as win probability.
++- `engine/resample.py` — `n`, `expected_n`, `coverage`, `complete`, and `source_step` metadata.
++
++Outputs:
++
++- `store/intel/{SYMBOL}.json`
++- `_site/data/intel_{SYMBOL}.json`
++- `state.json → pairs[SYMBOL].intel`
++- Dashboard Market Intelligence panel
++
++Emergency switch: `INTEL_ENABLED=false`. Intelligence failures are non-blocking and do not stop legacy analysis, journaling, monitoring, or chart creation.
+diff -ruN baseline/VERIFICATION_AUTO_FIB_V2.md package/getergeter-autofib-v2-v22/VERIFICATION_AUTO_FIB_V2.md
+--- baseline/VERIFICATION_AUTO_FIB_V2.md	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/VERIFICATION_AUTO_FIB_V2.md	2026-11-12 10:07:13.992464212 +0000
+@@ -0,0 +1,36 @@
++# Verification — Auto Fib v2
++
++## Automated checks
++
++- Python compile: PASS
++- JavaScript syntax (`docs/app.js`, `worker/worker.js`): PASS
++- GitHub workflow YAML parse: PASS
++- Deterministic unit tests: 8/8 PASS
++- Offline engine simulation: PASS (XAUUSD + BTCUSDT, 14 sequential runs)
++- Strict JSON parse of all generated site, Fib-journal, and intel files: PASS
++- Persistent Fib journal idempotence: PASS
++
++## Unit-test coverage
++
++1. LOCKED requires endpoint confirmation and ≥23.6% retracement.
++2. Wick above 1.0 does not trigger EXTENDED; close above 1.0 does.
++3. Replacement waits for complete HL→HH and new-leg confirmation/retracement.
++4. Replaced Fib is retained as the previous Fib.
++5. Close through 100% triggers INVALID.
++6. Approved extension levels calculate correctly.
++7. Prefix-invariance test confirms no lookahead.
++8. Cluster overlap and persistent history deduplication work.
++
++## Offline simulation observations
++
++- Engine completed sequential runs without aborting.
++- Both symbols emitted Market Intelligence snapshots.
++- BTCUSDT produced a current LOCKED primary Fib and persisted lifecycle history.
++- XAUUSD had no current primary Fib at the final simulated close, while historical Fib events remained persisted. This is valid behavior: an invalid Fib stays historical and a new primary is not fabricated before another leg satisfies LOCKED.
++
++## Still requires live verification
++
++- Browser appearance at deployed viewport sizes.
++- Telegram delivery with real credentials and production chart captions.
++- Real-feed threshold calibration and market profitability.
++- Long-running storage growth on the data branch.
+diff -ruN baseline/docs/app.js package/getergeter-autofib-v2-v22/docs/app.js
+--- baseline/docs/app.js	2026-11-12 10:07:30.601434842 +0000
++++ package/getergeter-autofib-v2-v22/docs/app.js	2026-11-12 10:01:52.194466880 +0000
+@@ -1,4 +1,5 @@
+-/* Market Monitor v20 – + HTF POI (FVG/OB H4 -> CHoCH M15 -> BOS M15) di panel Monitoring Events & chart.
++/* Market Monitor v22-auto-fib-v2 – Auto Fib lifecycle + Phase 1 Intelligence.
++   Market Monitor v20 – + HTF POI (FVG/OB H4 -> CHoCH M15 -> BOS M15) di panel Monitoring Events & chart.
+    Market Monitor v19 – Auto Fibonacci (H4 utama tebal + Fib lokal tipis per TF), MODE MONITORING
+    (sinyal BUY/SELL disembunyikan, panel Monitoring Events dari monitor_{PAIR}.json), preset tampilan Minimal,
+    status Telegram per pesan (SENT / RETRYING / FAILED) + catatan run engine.
+@@ -205,31 +206,42 @@
+       if (!dead) label(`${bull ? "BUY" : "SELL"} ${ZST[z.stage] || z.stage} · ${z.score}/${z.max_score || 10}${ZMD[z.model] || ""}`,
+         Math.max(x0, 0) + 5, y0 + 7, bull ? C.zoneBuyL : C.zoneSellL, { size: 9, bold: true });
+     });
+-    // ---- v19: Auto Fibonacci – H4 utama (tebal oranye + zona 50–61.8) & Fib lokal TF aktif (tipis) ----
+-    const fibDraw = (fb, primary) => {
++    // ---- v22: Auto Fib v2 lifecycle + extension + previous Fib + cluster ----
++    const fibDraw = (fb, primary, historical = false) => {
+       if (!fb || !fb.levels) return;
++      if (!historical && fb.previous) fibDraw(fb.previous, primary, true); // exactly one previous Fib, dashed
+       const col = primary ? C.fibMain : C.fibLocal;
+       const xa = Math.max(0, xOf(idxOf(Math.min(fb.anchor100.t, fb.anchor0.t))) - S.sp / 2);
+       if (xa > pw) return;
+-      const dead = fb.status === "invalid";
+-      ctx.save(); ctx.globalAlpha = dead ? 0.35 : 1;
+-      if (primary && fb.gold) { const y0 = Y.y(fb.gold[1]), y1 = Y.y(fb.gold[0]); ctx.fillStyle = C.fibBand; ctx.fillRect(xa, y0, pw - xa, Math.max(1, y1 - y0)); }
++      const status = String(fb.status || "FORMING").toUpperCase(), dead = status === "INVALID";
++      ctx.save(); ctx.globalAlpha = historical ? 0.42 : dead ? 0.35 : status === "FORMING" ? 0.65 : 1;
++      if (primary && fb.gold && !historical) { const y0 = Y.y(fb.gold[1]), y1 = Y.y(fb.gold[0]); ctx.fillStyle = C.fibBand; ctx.fillRect(xa, y0, pw - xa, Math.max(1, y1 - y0)); }
++      (fb.clusters || []).forEach((z) => { if (historical) return; const y0 = Y.y(z.top), y1 = Y.y(z.bottom);
++        ctx.fillStyle = "rgba(124,58,237,.16)"; ctx.fillRect(xa, y0 - 1, pw - xa, Math.max(2, y1 - y0 + 2));
++        label(z.label || "Fib cluster", xa + 6, y0 - 5, C.conf, { size: 9, bold: true, bg: "rgba(255,255,255,.78)" }); });
+       const lab = [];
+       fb.levels.forEach((lv) => {
+-        if (lv.r === 0.236) return;                                   // minimalis: 23.6 tidak digambar
+         const y = Y.y(lv.price), key = lv.r === 0.5 || lv.r === 0.618;
+-        hline(y, xa, pw, col, primary ? [] : [4, 3], primary ? (key ? 1.5 : 1) : 0.8);
++        const dash = historical ? [6, 5] : status === "FORMING" ? [3, 3] : primary ? [] : [4, 3];
++        hline(y, xa, pw, col, dash, primary ? (key ? 1.5 : 1) : 0.8);
+         const txt = `${fb.tf} ${+(lv.r * 100).toFixed(1)}%` + (primary ? ` (${fx(lv.price, D.digits)})` : "");
+-        if (primary) label(txt, Math.max(xa, 0) + 6, y - 7, col, { size: 10, bold: key, bg: "rgba(255,255,255,.75)" });
++        if (primary && !historical) label(txt, Math.max(xa, 0) + 6, y - 7, col, { size: 10, bold: key, bg: "rgba(255,255,255,.75)" });
+         else lab.push([txt, y]);
+       });
+-      if (!primary) {
++      if (!historical && status === "EXTENDED") (fb.extensions || []).forEach((lv) => {
++        const y = Y.y(lv.price); hline(y, xa, pw, col, [7, 3], lv.x === 1.618 ? 1.35 : 0.9);
++        label(`${fb.tf} EXT ${lv.notation} (${fx(lv.price, D.digits)})`, primary ? xa + 6 : pw - 6, y - 6, col,
++          { size: primary ? 9 : 8, bold: lv.x === 1.618, align: primary ? "left" : "right", bg: "rgba(255,255,255,.72)" });
++      });
++      if (!primary || historical) {
+         const x0 = xOf(idxOf(fb.anchor100.t)), x1 = xOf(idxOf(fb.anchor0.t));
+         ctx.save(); ctx.strokeStyle = col; ctx.setLineDash([2, 3]); ctx.lineWidth = 0.9; ctx.beginPath();
+         ctx.moveTo(x0, Y.y(fb.anchor100.price)); ctx.lineTo(x1, Y.y(fb.anchor0.price)); ctx.stroke(); ctx.restore();
+         const lx = x1 + 8 < pw - 70 ? x1 + 8 : pw - 6, la = x1 + 8 < pw - 70 ? "left" : "right";
+         lab.forEach(([t, y]) => label(t, lx, y - 6, col, { size: 9, align: la }));
+       }
++      if (!historical) label(`${fb.tf} ${status} · 1.0 @ ${fx(fb.anchor0.price, D.digits)}`,
++        Math.min(pw - 6, xa + 8), Y.y(fb.anchor0.price) - 18, col, { size: 10, bold: true, bg: "rgba(255,255,255,.82)" });
+       ctx.restore();
+     };
+     if (S.show.fibH4) fibDraw(D.fib_primary || (P() && P().fib_primary), true);
+@@ -764,8 +776,8 @@
+     if (p.book) rows.push(["Book ±0,5%", "bid " + p.book["imb_0.5"].toFixed(0) + "%", p.book["imb_0.5"] >= 50 ? "up" : "dn"]);
+     rows.push(["Lokasi", (a.premium_discount || "-").replace("_", " "), ""]);
+     const fp = p.fib_primary, fl = a.fib;
+-    rows.push(["Fib " + (fp ? fp.tf : "H4"), fp ? `${fp.dir === "bull" ? "▲" : "▼"} ${fp.retrace ?? "-"}%` : "-", fp ? cls(fp.dir) : ""]);
+-    if (S.tf !== (fp && fp.tf)) rows.push(["Fib " + S.tf, fl ? `${fl.dir === "bull" ? "▲" : "▼"} ${fl.retrace ?? "-"}%` : "-", fl ? cls(fl.dir) : ""]);
++    rows.push(["Fib " + (fp ? fp.tf : "H4"), fp ? `${fp.dir === "bull" ? "▲" : "▼"} ${fp.status || "-"} · ${fp.retrace ?? "-"}%` : "-", fp ? cls(fp.dir) : ""]);
++    if (S.tf !== (fp && fp.tf)) rows.push(["Fib " + S.tf, fl ? `${fl.dir === "bull" ? "▲" : "▼"} ${fl.status || "-"} · ${fl.retrace ?? "-"}%` : "-", fl ? cls(fl.dir) : ""]);
+     if (MONITOR()) {
+       const le = p.monitor && p.monitor.last && p.monitor.last.slice(-1)[0];
+       rows.push(["Mode", "MONITOR", ""]);
+@@ -870,11 +882,26 @@
+   function fibCard(fb, d, local) {
+     if (!fb) return `<div class="fibcard${local ? " loc" : ""}"><div class="t">Fib ${local ? "lokal" : "utama"}</div><span class="muted">Belum ada impuls valid (BOS/CHoCH).</span></div>`;
+     const bull = fb.dir === "bull", lv = (r) => (fb.levels.find((x) => x.r === r) || {}).price;
+-    return `<div class="fibcard${local ? " loc" : ""}"><div class="t">Fib ${esc(fb.tf)} ${local ? "lokal" : "utama"} · <span class="${cls(fb.dir)}">${bull ? "Bullish" : "Bearish"}</span> <span class="muted">(${esc(fb.scope)}${fb.status === "invalid" ? ", INVALID" : ""}${fb.extending ? ", 0% masih berjalan" : ""})</span></div>
+-      <div class="fibgrid"><span>100% (awal)</span><b>${fx(fb.anchor100.price, d)}</b><span>0% (ujung)</span><b>${fx(fb.anchor0.price, d)}</b>
++    const status = String(fb.status || "FORMING").toUpperCase();
++    const ext = status === "EXTENDED" ? `<div class="muted">Target extension: ${(fb.extensions || []).map((x) => `${esc(x.notation)} ${fx(x.price, d)}`).join(" · ")}</div>` : "";
++    const cluster = (fb.clusters || []).length ? `<div class="muted"><b>Fib cluster:</b> ${(fb.clusters || []).map((z) => esc(z.label)).join(" · ")}</div>` : "";
++    return `<div class="fibcard${local ? " loc" : ""}"><div class="t">Fib ${esc(fb.tf)} ${local ? "lokal" : "utama"} · <span class="${cls(fb.dir)}">${bull ? "Bullish" : "Bearish"}</span> <b>${esc(status)}</b> <span class="muted">(${esc(fb.scope)})</span></div>
++      <div class="fibgrid"><span>100% (awal)</span><b>${fx(fb.anchor100.price, d)}</b><span>1.0 / 0% (ujung)</span><b>${fx(fb.anchor0.price, d)}</b>
+       <span>38.2%</span><b>${fx(lv(0.382), d)}</b><span>78.6%</span><b>${fx(lv(0.786), d)}</b>
+       <span>Zona 50–61.8</span><b class="g">${fx(fb.gold[0], d)} – ${fx(fb.gold[1], d)}</b><span>Retrace</span><b>${fb.retrace ?? "-"}% <span class="muted">${esc(fb.zone || "")}</span></b></div>
+-      <div class="muted">Anchor dari ${esc(fb.event.label)} ${wib(fb.event.t, "full")} · ${bull ? "100% = swing low → 0% = swing high" : "100% = swing high → 0% = swing low"}</div></div>`;
++      ${ext}${cluster}<div class="muted">Anchor dari ${esc(fb.event.label)} ${wib(fb.event.t, "full")} · ${fb.previous ? "Fib sebelumnya tetap ditampilkan putus-putus · " : ""}${bull ? "100% = swing low → 1.0 = swing high" : "100% = swing high → 1.0 = swing low"}</div></div>`;
++  }
++
++  function intelPanel() {
++    const p = P(), el = $("p-intel"), x = p.intel;
++    if (!x) { el.innerHTML = `<h3>Market Intelligence</h3><p class="muted">Intel nonaktif atau belum tersedia.</p>`; return; }
++    const c = x.confidence || {}, m = x.mtf || {}, r = (x.regime || {})[x.primary_tf] || {}, h = x.data_health || {};
++    const liq = (x.liquidity || []).map((z) => `<li>${esc(z.name)} ${fx(z.price, p.digits)} · <b>${esc(z.status)}</b> <span class="muted">(${esc(z.kind)})</span></li>`).join("");
++    el.innerHTML = `<h3>Market Intelligence · ${esc(x.primary_tf || "-")}</h3>
++      <div class="kv"><div><small>Regime</small><b>${esc(r.state || "-")}</b></div><div><small>MTF</small><b>${esc(m.direction || "-")} ${m.alignment ?? 0}%</b></div>
++      <div><small>Confidence</small><b>${c.value ?? 0}/100</b></div><div><small>Decision</small><b>${esc(c.decision || "NO_EDGE")}</b></div></div>
++      <p class="muted">Confidence adalah context score, bukan probabilitas kemenangan. Data coverage ${(100 * (h.coverage || 0)).toFixed(1)}% · ${h.complete ? "complete" : "incomplete"}.</p>
++      ${liq ? `<h4>Liquidity map (price-level proxy)</h4><ul class="list">${liq}</ul>` : ""}`;
+   }
+   function panels() {
+     const st = S.state, p = P(), d = p.digits, ov = p.overall, s = ov.setup;
+@@ -904,6 +931,7 @@
+         ${MONITOR() ? "" : zoneList(a.zones, d)}`;
+     }
+     flowPanel();
++    intelPanel();
+     statusInto($("p-status"));
+     eventsPanel();
+     historyPanel();
+diff -ruN baseline/docs/index.html package/getergeter-autofib-v2-v22/docs/index.html
+--- baseline/docs/index.html	2026-11-12 10:07:30.603434847 +0000
++++ package/getergeter-autofib-v2-v22/docs/index.html	2026-11-12 10:01:20.030574827 +0000
+@@ -90,10 +90,11 @@
+   </div>
+ </section>
+ <section class="panel wide" id="p-events"></section>
++<section class="panel wide" id="p-intel"></section>
+ <section class="panel wide" id="p-history"></section>
+ <section class="panel wide" id="p-status"></section>
+-<p class="foot">v20 · HTF POI (FVG/OB H4 → CHoCH M15 → BOS) · Mode monitoring: sinyal BUY/SELL nonaktif, engine mencatat kejadian/setup + Auto Fibonacci (H4 utama, Fib lokal per TF) · XAUUSD: RealMarketAPI M5 tiap 5 menit (07–12 New York) / 10 menit (di luar sesi), otomatis diperlambat bila kuota menipis · Crypto top 10: Binance M1 tiap 5 menit + live WebSocket di browser · Riwayat sinyal tidak pernah dihapus · Bukan nasihat keuangan.</p>
+-<script src="app.js?v=20"></script>
++<p class="foot">v22 · Phase 1 Market Intelligence v21 + Auto Fib v2 lifecycle (FORMING / LOCKED / EXTENDED / REPLACED / INVALID), extension, previous Fib, cluster, dan histori persisten · Bukan nasihat keuangan.</p>
++<script src="app.js?v=22"></script>
+   <!-- Tombol ke halaman Footprint -->
+ <a href="footprint.html" id="fpLink"
+    style="position:fixed;right:14px;bottom:18px;z-index:9999;
+diff -ruN baseline/engine/analysis.py package/getergeter-autofib-v2-v22/engine/analysis.py
+--- baseline/engine/analysis.py	2026-11-12 10:07:30.550434734 +0000
++++ package/getergeter-autofib-v2-v22/engine/analysis.py	2026-11-12 09:58:32.986188559 +0000
+@@ -244,6 +244,7 @@
+     lb = bars[-1]
+     # v19: Auto Fibonacci TF ini (anchor dari leg BOS/CHoCH, lihat fibo.py)
+     fib_pub, fib_legs, fib_series = fibo.build(bars, smc, atr14, tf, digits, price)
++    fib_history = fib_pub.pop("_history", []) if fib_pub else []
+     pools_active = [dict(p, label=p["label"]) for p in smc["liquidity"]]
+     result.update(
+         trend=trend, structure=sdir or idir, internal_structure=idir, swing_structure=sdir,
+@@ -266,7 +267,7 @@
+         setups=first, zones=zones, fib=fib_pub,
+         # internal (tidak ditulis ke state.json): dipakai decide() & journal
+         _on=on, _setups=setups, _times=[b["t"] for b in bars], _closes=[b["c"] for b in bars],
+-        _bars=bars, _smc=smc, _atr14=atr14, _fib_series=fib_series,
++        _bars=bars, _smc=smc, _atr14=atr14, _fib_series=fib_series, _fib_history=fib_history,
+         series={"times": [b["t"] for b in bars], "ma20": ma20, "ma50": ma50, "ma200": ma200},
+     )
+     return result
+diff -ruN baseline/engine/charts.py package/getergeter-autofib-v2-v22/engine/charts.py
+--- baseline/engine/charts.py	2026-11-12 10:07:30.550434734 +0000
++++ package/getergeter-autofib-v2-v22/engine/charts.py	2026-11-12 09:59:37.600942107 +0000
+@@ -180,31 +180,48 @@
+                     color=DN, ha="center", fontsize=9, weight="bold",
+                     arrowprops=dict(arrowstyle="-|>", color=DN), zorder=8)
+ 
+-    # ---- v19: Auto Fibonacci (utama tebal oranye, lokal tipis abu-biru) ----
+-    def draw_fib(fb, primary):
++    # ---- v22: Auto Fib v2 lifecycle, extension, previous dashed, cluster ----
++    def draw_fib(fb, primary, historical=False):
+         if not fb or not fb.get("levels"):
+             return
++        if not historical and fb.get("previous"):
++            draw_fib(fb["previous"], primary, True)
+         col = FIB_MAIN if primary else FIB_LOCAL
+         xa = max(0, xpos(min(fb["anchor100"]["t"], fb["anchor0"]["t"])))
+-        if primary:
++        status = str(fb.get("status") or "FORMING").upper()
++        alpha = 0.42 if historical else 0.35 if status == "INVALID" else 0.65 if status == "FORMING" else 0.95
++        if primary and not historical:
+             g = fb.get("gold") or []
+             if len(g) == 2:
+                 ax.add_patch(Rectangle((xa - 0.4, g[0]), n + 3 - xa, g[1] - g[0], facecolor=FIB_MAIN,
+                                        alpha=0.10, edgecolor="none", zorder=1))
++            for z in fb.get("clusters") or []:
++                h = max(z["top"] - z["bottom"], max((max(b["h"] for b in bars) - min(b["l"] for b in bars)) * .001, 1e-12))
++                ax.add_patch(Rectangle((xa - .4, z["bottom"] - h * .05), n + 3 - xa, h * 1.1,
++                                       facecolor="#7c3aed", alpha=.16, edgecolor="none", zorder=1.2))
++                ax.text(xa + .5, z["top"], z.get("label", "Fib cluster"), color="#7c3aed", fontsize=6.3,
++                        ha="left", va="bottom", weight="bold", zorder=5)
+         for lv in fb["levels"]:
+-            if not primary and lv["r"] in (0.236,):
+-                continue
+             key = lv["r"] in (0.5, 0.618)
+             ax.hlines(lv["price"], xa, n + 3, colors=col, linewidth=(1.3 if key else 0.8) if primary else 0.6,
+-                      linestyles="-" if primary else "--", alpha=0.95 if primary else 0.7, zorder=3)
++                      linestyles="--" if historical or status == "FORMING" or not primary else "-", alpha=alpha, zorder=3)
+             ax.text(n + 2.8 if primary else xa + 0.5, lv["price"],
+                     f"{fb['tf']} {lv['r'] * 100:g}%" + (f" {lv['price']:.{digits}f}" if primary else ""),
+-                    color=col, fontsize=6.3 if primary else 5.6, ha="right" if primary else "left",
++                    color=col, alpha=alpha, fontsize=6.3 if primary else 5.6, ha="right" if primary else "left",
+                     va="bottom", zorder=4, clip_on=True)
+-        if not primary:
++        if not historical and status == "EXTENDED":
++            for lv in fb.get("extensions") or []:
++                ax.hlines(lv["price"], xa, n + 3, colors=col, linewidth=1.15 if lv["x"] == 1.618 else .75,
++                          linestyles="--", alpha=.9, zorder=3)
++                ax.text(n + 2.8, lv["price"], f"EXT {lv['notation']} {lv['price']:.{digits}f}", color=col,
++                        fontsize=6.1, ha="right", va="bottom", zorder=4, clip_on=True)
++        if not primary or historical:
+             x1 = xpos(fb["anchor0"]["t"])
+             ax.plot([xa, x1], [fb["anchor100"]["price"], fb["anchor0"]["price"]], color=col,
+-                    linestyle=":", linewidth=0.8, zorder=3)
++                    linestyle=":", linewidth=0.8, alpha=alpha, zorder=3)
++        if not historical:
++            ax.text(xa + .4, fb["anchor0"]["price"], f"{fb['tf']} {status} · 1.0", color=col, fontsize=6.6,
++                    ha="left", va="bottom", weight="bold", zorder=5)
+ 
+     draw_fib(an.get("fib_primary"), True)
+     draw_fib(an.get("fib_local"), False)
+diff -ruN baseline/engine/config.py package/getergeter-autofib-v2-v22/engine/config.py
+--- baseline/engine/config.py	2026-11-12 10:07:30.550434734 +0000
++++ package/getergeter-autofib-v2-v22/engine/config.py	2026-11-12 09:57:58.508291616 +0000
+@@ -77,7 +77,7 @@
+ STORE_LIMIT = {"M1": 4400, "M5": 6000, "M15": 4000, "H1": 4000, "H4": 3000, "D": 2000, "W": 1000}
+ CHART_BARS = dict(STORE_LIMIT)
+ JOURNAL_SETUP_LIMIT = int(_get("JOURNAL_SETUP_LIMIT", "3000"))   # per TF; entry tidak dibatasi
+-ENGINE_VERSION = "v20"
++ENGINE_VERSION = "v22-auto-fib-v2"
+ 
+ # ---------- Strategi top-down ----------
+ BIAS_TF = _get("BIAS_TF", "H4")
+@@ -166,11 +166,19 @@
+     SIGNAL_MODE = "monitor"
+ SIGNALS_ON = SIGNAL_MODE == "signal"
+ 
+-# ---------- v19: Auto Fibonacci (fibo.py) ----------
++# ---------- v22: Auto Fibonacci v2 (fibo.py) ----------
+ FIB_ENABLED = _bool("FIB_ENABLED", True)
+ FIB_PRIMARY_TF = _get("FIB_PRIMARY_TF", "H4").upper()        # Fib utama (tebal) – tampil di semua TF
+ FIB_MIN_ATR = float(_get("FIB_MIN_ATR", "1.0"))              # leg impuls minimal N x ATR14 TF tsb
+-FIB_FALLBACK_INTERNAL = _bool("FIB_FALLBACK_INTERNAL", True) # fib swing invalid -> pakai leg internal valid
++FIB_LOCK_RETRACE = float(_get("FIB_LOCK_RETRACE", "0.236"))  # pullback minimum sebelum LOCKED/replacement
++FIB_FALLBACK_INTERNAL = False                                  # v2: internal tidak pernah mengganti Fib utama
++FIB_HISTORY_LIMIT = int(_get("FIB_HISTORY_LIMIT", "10000"))  # lifecycle events per pair (persisten)
++
++# ---------- Phase 1 v21: Market Intelligence (live, non-blocking) ----------
++INTEL_ENABLED = _bool("INTEL_ENABLED", True)
++INTEL_MODE = _get("INTEL_MODE", "live").lower()
++INTEL_REGIME_LOOKBACK = int(_get("INTEL_REGIME_LOOKBACK", "100"))
++INTEL_MIN_COVERAGE = float(_get("INTEL_MIN_COVERAGE", "0.90"))
+ 
+ # ---------- v19: Monitoring kejadian/setup (monitor.py) ----------
+ MONITOR_SYMBOLS = _list("MONITOR_SYMBOLS", "XAUUSD")         # pair yang dicatat & dinotifkan
+@@ -183,7 +191,7 @@
+ # Tipe kejadian yang dikirim ke Telegram (lainnya hanya dicatat di dashboard):
+ #   STRUCTURE, SWEEP, FVG_NEW, OB_NEW, HTF_FIB, LOCAL_FIB, FIB_INVALID, OB_FVG_OVERLAP, CONFLUENCE
+ #   HTF_POI (v20)
+-MONITOR_NOTIFY = _list("MONITOR_NOTIFY", "STRUCTURE,SWEEP,HTF_FIB,OB_FVG_OVERLAP,CONFLUENCE,HTF_POI")
++MONITOR_NOTIFY = _list("MONITOR_NOTIFY", "STRUCTURE,SWEEP,HTF_FIB,OB_FVG_OVERLAP,CONFLUENCE,HTF_POI,FIB_LOCKED,FIB_EXTENDED,FIB_REPLACED,FIB_INVALID")
+ 
+ # ---------- v20: HTF POI -> CHoCH LTF (monitor.py) ----------
+ # Harga MONITOR_TF masuk FVG/OB HTF_POI_TF -> CHoCH/iCHoCH searah -> BOS/iBOS lanjutan.
+diff -ruN baseline/engine/fib_journal.py package/getergeter-autofib-v2-v22/engine/fib_journal.py
+--- baseline/engine/fib_journal.py	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/engine/fib_journal.py	2026-11-12 10:02:48.379165714 +0000
+@@ -0,0 +1,49 @@
++"""Persistent immutable Auto Fib v2 lifecycle journal."""
++import json
++import os
++
++import config
++
++
++class FibJournal:
++    def __init__(self, store_dir, symbol):
++        self.symbol = symbol
++        self.path = os.path.join(store_dir, "fib", f"{symbol}.json")
++        try:
++            with open(self.path, encoding="utf-8") as fh:
++                self.data = json.load(fh)
++        except (OSError, ValueError):
++            self.data = {"version": 2, "symbol": symbol, "events": [], "cycles": {}}
++        self.data.setdefault("events", [])
++        self.data.setdefault("cycles", {})
++
++    def merge(self, tfs, now):
++        known = {e["id"] for e in self.data["events"]}
++        added = []
++        for tf, analysis in tfs.items():
++            for row in analysis.get("_fib_history") or []:
++                event, fib = row["event"], row["fib"]
++                eid = f"{tf}:{event['id']}"
++                if eid in known:
++                    continue
++                rec = {**event, "id": eid, "tf": tf, "first_seen": now, "fib": fib}
++                self.data["events"].append(rec)
++                known.add(eid)
++                added.append(rec)
++                cycle = self.data["cycles"].setdefault(fib["id"], {
++                    "id": fib["id"], "tf": tf, "dir": fib["dir"], "scope": "swing",
++                    "anchor100": fib["anchor100"], "anchor0": fib["anchor0"], "states": []})
++                if not cycle["states"] or cycle["states"][-1]["status"] != fib["status"]:
++                    cycle["states"].append({"status": fib["status"], "t": event["t"], "event_id": eid})
++        self.data["events"] = self.data["events"][-config.FIB_HISTORY_LIMIT:]
++        self.data["updated_ts"] = now
++        return added
++
++    def save(self):
++        os.makedirs(os.path.dirname(self.path), exist_ok=True)
++        with open(self.path, "w", encoding="utf-8") as fh:
++            json.dump(self.data, fh, separators=(",", ":"), ensure_ascii=False)
++
++    def public(self):
++        return {"version": 2, "symbol": self.symbol, "updated_ts": self.data.get("updated_ts"),
++                "events": self.data["events"], "cycles": list(self.data["cycles"].values())}
+diff -ruN baseline/engine/fibo.py package/getergeter-autofib-v2-v22/engine/fibo.py
+--- baseline/engine/fibo.py	2026-11-12 10:07:30.550434734 +0000
++++ package/getergeter-autofib-v2-v22/engine/fibo.py	2026-11-12 10:06:37.988647515 +0000
+@@ -1,159 +1,362 @@
+-"""Auto Fibonacci v1 (H4 utama + Fib lokal per TF) – hanya candle tertutup, tanpa lookahead.
++"""Auto Fibonacci v2 – deterministic lifecycle, closed candles only, no lookahead.
+ 
+-KONVENSI (dikunci, sama untuk semua TF):
+-  Bullish impulse : Swing Low  = 100%  ->  Swing High = 0%
+-  Bearish impulse : Swing High = 100%  ->  Swing Low  = 0%
+-  Level retracement dihitung DARI ujung impulse (0%) KEMBALI ke awal impulse (100%):
+-    bull : harga(r) = high - r x (high - low)      (turun dari swing high)
+-    bear : harga(r) = low  + r x (high - low)      (naik dari swing low)
+-
+-PEMILIHAN ANCHOR (bukan highest-high / lowest-low sembarang):
+-  1. Impulse = leg yang menghasilkan BOS/CHoCH (definisi struktur dari smc.py, pivot terkonfirmasi).
+-       bull: pivot high p ditembus close di bar i  -> 100% = low terendah di [p..i] (asal impuls)
+-       bear: pivot low  p ditembus close di bar i  -> 100% = high tertinggi di [p..i]
+-  2. 0% = ekstrem impuls sejak asal impuls. 0% HANYA bergeser bila harga membuat ekstrem baru
+-     (impuls masih memanjang) – bukan karena noise candle.
+-  3. Anchor diganti hanya oleh BOS/CHoCH baru (scope sama). Leg kecil (< FIB_MIN_ATR x ATR14) diabaikan.
+-  4. Close menembus 100% -> fib INVALID. Bila fib swing invalid, dipakai fib internal terbaru yang
+-     masih valid (ditandai scope=internal) sampai muncul leg swing baru.
++Lifecycle per timeframe:
++  FORMING -> LOCKED -> EXTENDED -> REPLACED / INVALID
++
++Rules:
++* Only swing BOS/CHoCH legs can seed the primary Fib. Internal Fib never replaces it.
++* FORMING endpoint may follow new extremes.
++* LOCKED requires: endpoint pivot confirmed after ``k`` closed candles, at least 23.6%
++  wick retracement, and no close through the 100% origin.
++* 1.0 breakout and 100% invalidation use CLOSE, never wick.
++* A same-direction Fib replaces the old one only after a complete HL->HH / LH->LL:
++  close through old 1.0, new endpoint pivot confirmation, then >=23.6% pullback
++  of the new leg. The last replaced/invalid Fib remains available as ``previous``.
+ """
+ from bisect import bisect_right
++from copy import deepcopy
+ 
+ import config
+ 
+ LEVELS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+-GOLD = (0.5, 0.618)                    # zona utama yang dipantau (50 – 61.8)
+-_RANK = {"internal": 0, "swing": 1}
++EXTENSIONS = (1.236, 1.382, 1.618, 2.236, 2.618)
++GOLD = (0.5, 0.618)
++_EPS = 1e-12
+ 
+ 
+ def price_at(direction, hi, lo, r):
++    """Retracement notation: 0 at impulse end, 1 at impulse origin."""
+     return hi - r * (hi - lo) if direction == "bull" else lo + r * (hi - lo)
+ 
+ 
++def extension_price(direction, hi, lo, x):
++    """Extension notation: 1.0 at impulse end, values >1 beyond it."""
++    return lo + x * (hi - lo) if direction == "bull" else hi - x * (hi - lo)
++
++
+ def retrace_of(direction, hi, lo, price):
+     rng = hi - lo
+-    if rng <= 1e-12:
++    if rng <= _EPS:
+         return None
+     return (hi - price) / rng if direction == "bull" else (price - lo) / rng
+ 
+ 
+-def legs(bars, events, atr14, scope):
+-    """Impulse leg untuk setiap BOS/CHoCH dengan scope tertentu (urut index break)."""
++def _wick_retrace(state, bar):
++    p = bar["l"] if state["dir"] == "bull" else bar["h"]
++    return retrace_of(state["dir"], state["hi"], state["lo"], p)
++
++
++def _origin_price(state):
++    return state["lo"] if state["dir"] == "bull" else state["hi"]
++
++
++def _end_price(state):
++    return state["hi"] if state["dir"] == "bull" else state["lo"]
++
++
++def _invalid_close(state, bar):
++    return bar["c"] < state["lo"] if state["dir"] == "bull" else bar["c"] > state["hi"]
++
++
++def _break_1_close(state, bar):
++    return bar["c"] > state["hi"] if state["dir"] == "bull" else bar["c"] < state["lo"]
++
++
++def legs(bars, events, atr14, scope="swing"):
++    """Seed legs from confirmed structural breaks. v2 intentionally ignores internal fallback."""
+     out = []
+-    min_atr = config.FIB_MIN_ATR
+     for e in events:
+         if e.get("scope") != scope:
+             continue
+         p, i = e.get("pivot_index"), e.get("index")
+-        if p is None or i is None or i <= p:
++        if p is None or i is None or not (0 <= p < i < len(bars)):
+             continue
+-        bull = e["dir"] == "bull"
++        bull = e.get("dir") == "bull"
+         seg = range(p, i + 1)
+-        o = min(seg, key=lambda j: (bars[j]["l"], j)) if bull else min(seg, key=lambda j: (-bars[j]["h"], j))
+-        ext = max(range(o, i + 1), key=lambda j: (bars[j]["h"], -j)) if bull else \
+-            max(range(o, i + 1), key=lambda j: (-bars[j]["l"], -j))
+-        lo = bars[o]["l"] if bull else bars[ext]["l"]
+-        hi = bars[ext]["h"] if bull else bars[o]["h"]
+-        a = atr14[i] if i < len(atr14) and atr14[i] else (bars[i]["h"] - bars[i]["l"])
+-        if hi - lo < min_atr * max(a, 1e-12):
++        origin = min(seg, key=lambda j: (bars[j]["l"], j)) if bull else max(seg, key=lambda j: (bars[j]["h"], -j))
++        ext = max(range(origin, i + 1), key=lambda j: (bars[j]["h"], -j)) if bull else min(
++            range(origin, i + 1), key=lambda j: (bars[j]["l"], j))
++        lo = bars[origin]["l"] if bull else bars[ext]["l"]
++        hi = bars[ext]["h"] if bull else bars[origin]["h"]
++        av = atr14[i] if i < len(atr14) and atr14[i] else bars[i]["h"] - bars[i]["l"]
++        if hi - lo < config.FIB_MIN_ATR * max(av, _EPS):
+             continue
+-        out.append({"id": f"FIB:{scope}:{e['dir']}:{bars[o]['t']}:{e['t']}", "scope": scope, "dir": e["dir"],
+-                    "i": i, "origin_i": o, "ext_i": ext, "lo": lo, "hi": hi,
+-                    "event": {"t": e["t"], "label": e["label"], "type": e["type"], "level": e["level"]}})
+-    out.sort(key=lambda x: x["i"])
+-    return out
++        out.append({
++            "seed_id": f"FIB2:{e['dir']}:{bars[origin]['t']}:{e['t']}", "dir": e["dir"],
++            "i": i, "origin_i": origin, "ext_i": ext, "lo": lo, "hi": hi,
++            "event": {"t": e["t"], "label": e["label"], "type": e["type"], "level": e["level"]},
++        })
++    return sorted(out, key=lambda x: (x["i"], x["origin_i"]))
++
++
++def _new_state(seed, bars):
++    return {
++        "id": seed["seed_id"], "leg_id": seed["seed_id"], "dir": seed["dir"], "scope": "swing",
++        "status": "FORMING", "origin_i": seed["origin_i"], "ext_i": seed["ext_i"],
++        "lo": seed["lo"], "hi": seed["hi"], "start_i": seed["i"], "start_t": seed["event"]["t"],
++        "event": deepcopy(seed["event"]), "lock_i": None, "extended_i": None, "invalid_i": None,
++        "max_retrace": 0.0, "pull_i": None, "break_i": None, "candidate": None,
++        "replaced_from": None, "events": [], "previous": None,
++    }
++
++
++def _event(state, typ, j, bars, description, **extra):
++    ev = {"id": f"{typ}:{state['id']}:{bars[j]['t']}", "type": typ, "i": j, "t": bars[j]["t"],
++          "tf_status": state["status"], "dir": state["dir"], "fib_id": state["id"],
++          "description": description}
++    ev.update(extra)
++    state["events"].append(ev)
++
++
++def _extend_forming(state, bar, j):
++    if state["dir"] == "bull" and bar["h"] > state["hi"]:
++        state["hi"], state["ext_i"], state["max_retrace"] = bar["h"], j, 0.0
++    elif state["dir"] == "bear" and bar["l"] < state["lo"]:
++        state["lo"], state["ext_i"], state["max_retrace"] = bar["l"], j, 0.0
++
++
++def _strict_continuation(old, origin_price):
++    return origin_price > old["lo"] if old["dir"] == "bull" else origin_price < old["hi"]
++
++
++def _start_candidate(state, bars):
++    if state.get("pull_i") is None:
++        return
++    oi = state["pull_i"]
++    op = bars[oi]["l"] if state["dir"] == "bull" else bars[oi]["h"]
++    if not _strict_continuation(state, op):
++        return
++    j = state["break_i"]
++    if state["dir"] == "bull":
++        ei = max(range(oi, j + 1), key=lambda x: (bars[x]["h"], -x))
++        lo, hi = op, bars[ei]["h"]
++    else:
++        ei = min(range(oi, j + 1), key=lambda x: (bars[x]["l"], x))
++        lo, hi = bars[ei]["l"], op
++    state["candidate"] = {"origin_i": oi, "ext_i": ei, "lo": lo, "hi": hi, "max_retrace": 0.0}
++
++
++def _advance_candidate(state, bars, j, k_confirm, min_retrace):
++    c, b = state.get("candidate"), bars[j]
++    if not c:
++        return None
++    if state["dir"] == "bull" and b["h"] > c["hi"]:
++        c.update(hi=b["h"], ext_i=j, max_retrace=0.0)
++    elif state["dir"] == "bear" and b["l"] < c["lo"]:
++        c.update(lo=b["l"], ext_i=j, max_retrace=0.0)
++    p = b["l"] if state["dir"] == "bull" else b["h"]
++    rt = retrace_of(state["dir"], c["hi"], c["lo"], p)
++    c["max_retrace"] = max(c["max_retrace"], rt or 0.0)
++    origin_broken = b["c"] < c["lo"] if state["dir"] == "bull" else b["c"] > c["hi"]
++    if origin_broken:
++        state["candidate"] = None
++        return None
++    if j - c["ext_i"] < k_confirm or c["max_retrace"] + _EPS < min_retrace:
++        return None
++    seed = {"seed_id": f"FIB2:{state['dir']}:{bars[c['origin_i']]['t']}:{bars[c['ext_i']]['t']}",
++            "dir": state["dir"], "i": state["break_i"], "origin_i": c["origin_i"], "ext_i": c["ext_i"],
++            "lo": c["lo"], "hi": c["hi"],
++            "event": {"t": bars[state["break_i"]]["t"], "label": "Continuation", "type": "BOS",
++                      "level": _end_price(state)}}
++    old = _archive(state)
++    old["status"] = "REPLACED"
++    new = _new_state(seed, bars)
++    new.update(status="LOCKED", lock_i=j, max_retrace=c["max_retrace"], previous=old,
++               replaced_from=state["id"])
++    _event(new, "FIB_LOCKED", j, bars, "Pivot ujung leg baru terkonfirmasi dan retrace leg baru mencapai minimal 23,6%.")
++    _event(new, "FIB_REPLACED", j, bars,
++           "Fib lama diganti setelah pola continuation lengkap: HL→HH / LH→LL, close melewati 1.0, pivot baru terkonfirmasi, lalu retrace minimal 23,6%.",
++           previous_id=state["id"])
++    return new
+ 
+ 
+-def _series_one(bars, lg, start_i):
+-    """Fib (scope tunggal) yang diketahui pada close bar j, untuk j >= start_i."""
+-    out = {}
+-    n = len(bars)
+-    for li, leg in enumerate(lg):
+-        a = leg["i"]
+-        b = lg[li + 1]["i"] if li + 1 < len(lg) else n
+-        if b <= start_i or a >= n:
+-            continue
+-        bull = leg["dir"] == "bull"
+-        hi, lo, ext_i, inv = leg["hi"], leg["lo"], leg["ext_i"], None
+-        for j in range(a, b):
+-            bj = bars[j]
+-            if j > a and inv is None:
+-                if bull and bj["h"] > hi:
+-                    hi, ext_i = bj["h"], j
+-                elif not bull and bj["l"] < lo:
+-                    lo, ext_i = bj["l"], j
+-            if inv is None and ((bull and bj["c"] < lo) or (not bull and bj["c"] > hi)):
+-                inv = j
+-            if j >= start_i:
+-                out[j] = (leg, hi, lo, ext_i, inv)
++def _archive(state):
++    if not state:
++        return None
++    keep = ("id", "leg_id", "dir", "scope", "status", "origin_i", "ext_i", "lo", "hi", "start_i",
++            "start_t", "event", "lock_i", "extended_i", "invalid_i", "max_retrace")
++    return {k: deepcopy(state.get(k)) for k in keep}
++
++
++def _advance(state, bars, j, k_confirm, min_retrace):
++    b = bars[j]
++    state["events"] = []
++    if state["status"] == "FORMING":
++        _extend_forming(state, b, j)
++        if _invalid_close(state, b):
++            state.update(status="INVALID", invalid_i=j)
++            _event(state, "FIB_INVALID", j, bars, "Close menembus level 100%; struktur leg FORMING gagal.")
++            return state
++        rt = _wick_retrace(state, b)
++        state["max_retrace"] = max(state["max_retrace"], rt or 0.0)
++        if j - state["ext_i"] >= k_confirm and state["max_retrace"] + _EPS >= min_retrace:
++            state.update(status="LOCKED", lock_i=j)
++            _event(state, "FIB_LOCKED", j, bars,
++                   "Pivot ujung impuls terkonfirmasi, retrace minimal 23,6% tercapai, dan belum ada close menembus 100%.")
++        return state
++
++    if state["status"] in ("LOCKED", "EXTENDED"):
++        if _invalid_close(state, b):
++            state.update(status="INVALID", invalid_i=j, candidate=None)
++            _event(state, "FIB_INVALID", j, bars, "Close menembus 100%; struktur Fib gagal dan anchor dibekukan sebagai histori.")
++            return state
++        if state["status"] == "LOCKED":
++            # Track the deepest post-lock pullback before the first 1.0 close breakout.
++            if state["dir"] == "bull":
++                if state["pull_i"] is None or b["l"] < bars[state["pull_i"]]["l"]:
++                    state["pull_i"] = j
++            elif state["pull_i"] is None or b["h"] > bars[state["pull_i"]]["h"]:
++                state["pull_i"] = j
++            if _break_1_close(state, b):
++                state.update(status="EXTENDED", extended_i=j, break_i=j)
++                _start_candidate(state, bars)
++                _event(state, "FIB_EXTENDED", j, bars,
++                       "Close melewati 1.0; anchor lama tetap dan target extension 1.236–2.618 diaktifkan.")
++                return state
++        else:
++            repl = _advance_candidate(state, bars, j, k_confirm, min_retrace)
++            if repl:
++                return repl
++    return state
++
++
++def lifecycle_series(bars, seeds, k_confirm, start_i=0, min_retrace=0.236):
++    """Return close-by-close snapshots; every snapshot uses only bars <= j."""
++    seed_at = {}
++    for s in seeds:
++        seed_at.setdefault(s["i"], []).append(s)
++    state, out = None, {}
++    pending = None
++    for j in range(len(bars)):
++        # Initial Fib, or a new structural seed after invalidation. Invalid Fib remains visible until lock.
++        if state is None:
++            avail = seed_at.get(j) or []
++            if avail:
++                state = _new_state(avail[-1], bars)
++        elif state["status"] == "INVALID" and pending is None:
++            avail = seed_at.get(j) or []
++            if avail:
++                pending = _new_state(avail[-1], bars)
++        if pending is not None:
++            pending = _advance(pending, bars, j, k_confirm, min_retrace)
++            if pending["status"] == "LOCKED":
++                pending["previous"] = _archive(state)
++                pending["replaced_from"] = state["id"]
++                _event(pending, "FIB_REPLACED", j, bars, "Fib invalid diganti setelah leg struktural baru memenuhi syarat LOCKED.",
++                       previous_id=state["id"])
++                state, pending = pending, None
++            elif pending["status"] == "INVALID":
++                pending = None
++        elif state is not None:
++            state = _advance(state, bars, j, k_confirm, min_retrace)
++            # A CHoCH/BOS can invalidate the old Fib and seed the opposite leg on the same close.
++            # Capture that seed now; waiting for j+1 would lose it because seed events are point-in-time.
++            if state["status"] == "INVALID" and seed_at.get(j):
++                cand = seed_at[j][-1]
++                if cand["seed_id"] != state["id"]:
++                    pending = _advance(_new_state(cand, bars), bars, j, k_confirm, min_retrace)
++        if state is not None and j >= start_i:
++            snap = deepcopy(state)
++            if pending is not None:
++                snap["pending"] = deepcopy(pending)
++            out[j] = snap
+     return out
+ 
+ 
+-def series(bars, legs_by_scope, start_i=0):
+-    """Fib aktif per bar j: swing bila valid, kalau tidak internal valid terbaru, kalau tidak swing invalid."""
+-    sw = _series_one(bars, legs_by_scope.get("swing", []), start_i)
+-    it = _series_one(bars, legs_by_scope.get("internal", []), start_i) if config.FIB_FALLBACK_INTERNAL else {}
+-    out = {}
+-    for j in range(start_i, len(bars)):
+-        s, x = sw.get(j), it.get(j)
+-        if s and s[4] is None:
+-            out[j] = s
+-        elif x and x[4] is None and (not s or x[0]["i"] > s[4]):
+-            out[j] = x
+-        else:
+-            out[j] = s
+-    return out
++def lite(rec, bars=None, j=None):
++    if not rec:
++        return None
++    return {"leg_id": rec["leg_id"], "id": rec["id"], "scope": "swing", "dir": rec["dir"],
++            "hi": rec["hi"], "lo": rec["lo"], "origin_i": rec["origin_i"], "ext_i": rec["ext_i"],
++            "valid": rec["status"] != "INVALID", "status": rec["status"], "invalid_i": rec.get("invalid_i"),
++            "events": deepcopy(rec.get("events") or []), "previous": deepcopy(rec.get("previous"))}
++
++
++def _zone_label(rt):
++    if rt is None:
++        return None
++    return ("extension di atas 1.0" if rt < 0 else "0–38.2" if rt < 0.382 else "38.2–50" if rt < 0.5 else
++            "50–61.8 (zona utama)" if rt <= 0.618 else "61.8–78.6" if rt <= 0.786 else
++            "78.6–100" if rt <= 1 else "lewat 100%")
++
++
++def _one_public(rec, bars, tf, digits, price):
++    if not rec:
++        return None
++    bull, hi, lo = rec["dir"] == "bull", rec["hi"], rec["lo"]
++    a100 = {"t": bars[rec["origin_i"]]["t"], "price": round(lo if bull else hi, digits)}
++    a0 = {"t": bars[rec["ext_i"]]["t"], "price": round(hi if bull else lo, digits)}
++    rt = retrace_of(rec["dir"], hi, lo, price) if price is not None else None
++    return {"id": rec["id"], "leg_id": rec["leg_id"], "tf": tf, "scope": "swing", "dir": rec["dir"],
++            "status": rec["status"], "anchor100": a100, "anchor0": a0, "start_t": rec["start_t"],
++            "event": {**rec["event"], "level": round(rec["event"]["level"], digits)},
++            "levels": [{"r": r, "notation": f"{r * 100:g}%", "price": round(price_at(rec["dir"], hi, lo, r), digits)} for r in LEVELS],
++            "extensions": [{"x": x, "notation": f"{x:g}", "price": round(extension_price(rec["dir"], hi, lo, x), digits)} for x in EXTENSIONS],
++            "gold": sorted(round(price_at(rec["dir"], hi, lo, r), digits) for r in GOLD),
++            "range": round(hi - lo, digits), "retrace": None if rt is None else round(rt * 100, 1),
++            "zone": _zone_label(rt), "locked_t": bars[rec["lock_i"]]["t"] if rec.get("lock_i") is not None else None,
++            "extended_t": bars[rec["extended_i"]]["t"] if rec.get("extended_i") is not None else None,
++            "invalid_t": bars[rec["invalid_i"]]["t"] if rec.get("invalid_i") is not None else None,
++            "lifecycle_events": deepcopy(rec.get("events") or [])}
++
++
++def _clusters(active, previous, digits):
++    if not active or not previous:
++        return []
++    ag = sorted(active.get("gold") or [])
++    pg = sorted(previous.get("gold") or [])
++    out = []
++    if len(ag) == 2 and len(pg) == 2:
++        bot, top = max(ag[0], pg[0]), min(ag[1], pg[1])
++        if bot <= top:
++            out.append({"kind": "gold_overlap", "bottom": round(bot, digits), "top": round(top, digits),
++                        "label": "Fib cluster 50–61.8"})
++    if len(ag) == 2:
++        for lv in (previous.get("levels") or []) + (previous.get("extensions") or []):
++            p = lv["price"]
++            if ag[0] <= p <= ag[1]:
++                out.append({"kind": "level_overlap", "bottom": p, "top": p,
++                            "label": f"Fib cluster {lv.get('notation', '')}".strip()})
++    # deterministic dedupe
++    seen, unique = set(), []
++    for z in out:
++        key = (z["kind"], z["bottom"], z["top"], z["label"])
++        if key not in seen:
++            seen.add(key); unique.append(z)
++    return unique
+ 
+ 
+-def lite(rec, bars, j):
+-    """Ringkasan internal (dipakai monitor)."""
++def public(rec, bars, j, tf, digits, price, k_confirm=None):
+     if not rec:
+         return None
+-    leg, hi, lo, ext_i, inv = rec
+-    return {"leg_id": leg["id"], "id": f"{leg['id']}@{bars[ext_i]['t']}", "scope": leg["scope"], "dir": leg["dir"],
+-            "hi": hi, "lo": lo, "origin_i": leg["origin_i"], "ext_i": ext_i, "valid": inv is None or inv > j,
+-            "invalid_i": inv}
+-
+-
+-def public(rec, bars, j, tf, digits, price, k_confirm):
+-    """Format JSON untuk dashboard / state / Telegram."""
+-    f = lite(rec, bars, j)
+-    if not f:
+-        return None
+-    leg = rec[0]
+-    bull = f["dir"] == "bull"
+-    hi, lo = f["hi"], f["lo"]
+-    a100 = {"t": bars[f["origin_i"]]["t"], "price": round(lo if bull else hi, digits)}
+-    a0 = {"t": bars[f["ext_i"]]["t"], "price": round(hi if bull else lo, digits)}
+-    lv = [{"r": r, "price": round(price_at(f["dir"], hi, lo, r), digits)} for r in LEVELS]
+-    g = sorted(round(price_at(f["dir"], hi, lo, r), digits) for r in GOLD)
+-    rt = retrace_of(f["dir"], hi, lo, price) if price is not None else None
+-    zone = None
+-    if rt is not None:
+-        zone = ("di atas 0% (impuls memanjang)" if rt < 0 else "0 – 38.2" if rt < 0.382 else
+-                "38.2 – 50" if rt < 0.5 else "50 – 61.8 (zona utama)" if rt <= 0.618 else
+-                "61.8 – 78.6" if rt <= 0.786 else "78.6 – 100" if rt <= 1 else "lewat 100% (invalid)")
+-    return {"id": f["id"], "tf": tf, "scope": f["scope"], "dir": f["dir"],
+-            "anchor100": a100, "anchor0": a0, "start_t": leg["event"]["t"],
+-            "event": {"t": leg["event"]["t"], "label": leg["event"]["label"], "level": round(leg["event"]["level"], digits)},
+-            "levels": lv, "gold": g, "range": round(hi - lo, digits),
+-            "retrace": None if rt is None else round(rt * 100, 1), "zone": zone,
+-            "extending": f["ext_i"] > j - k_confirm,
+-            "status": "invalid" if not f["valid"] else "active"}
++    cur = _one_public(rec, bars, tf, digits, price)
++    prev = _one_public(rec.get("previous"), bars, tf, digits, price) if rec.get("previous") else None
++    cur["previous"] = prev
++    cur["clusters"] = _clusters(cur, prev, digits)
++    if rec.get("pending"):
++        cur["pending"] = _one_public(rec["pending"], bars, tf, digits, price)
++    return cur
+ 
+ 
+ def build(bars, smc, atr14, tf, digits, price):
+-    """Return (fib_public|None, legs_by_scope, series_fn). series_fn(start_i) -> {j: rec}."""
+     if not config.FIB_ENABLED or len(bars) < 10:
+-        return None, {}, (lambda start_i=0: {})
+-    ev = smc.get("events") or []
+-    lg = {"swing": legs(bars, ev, atr14, "swing"), "internal": legs(bars, ev, atr14, "internal")}
+-    k_int, _ = config.structure_lengths(tf)
++        return None, {"swing": []}, (lambda start_i=0: {})
++    swing_legs = legs(bars, smc.get("events") or [], atr14, "swing")
++    k_confirm, _ = config.structure_lengths(tf)
++    cache = lifecycle_series(bars, swing_legs, k_confirm, 0, config.FIB_LOCK_RETRACE)
+     last = len(bars) - 1
+-    cur = series(bars, lg, last).get(last)
+-    return public(cur, bars, last, tf, digits, price, k_int), lg, (lambda start_i=0: series(bars, lg, start_i))
++    cur = cache.get(last)
++    pub = public(cur, bars, last, tf, digits, price, k_confirm)
++    if pub is not None:
++        hist = []
++        for j, snap in cache.items():
++            for ev in snap.get("events") or []:
++                at = _one_public(snap, bars, tf, digits, bars[j]["c"])
++                hist.append({"id": ev["id"], "event": deepcopy(ev), "fib": at})
++        pub["_history"] = hist
++    return pub, {"swing": swing_legs}, (
++        lambda start_i=0: {j: deepcopy(v) for j, v in cache.items() if j >= start_i})
+ 
+ 
+ def index_at(close_times, T):
+-    """Index bar terakhir yang sudah close pada waktu T (close_times urut)."""
+     return bisect_right(close_times, T) - 1
+diff -ruN baseline/engine/intel/__init__.py package/getergeter-autofib-v2-v22/engine/intel/__init__.py
+--- baseline/engine/intel/__init__.py	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/engine/intel/__init__.py	2026-11-12 10:00:38.239680752 +0000
+@@ -0,0 +1,26 @@
++"""Phase 1 v21 intelligence orchestrator."""
++from . import confidence, fvg_quality, liqmap, mtf, regime
++
++
++def _health(a):
++    bars = a.get("_bars") or []
++    if not bars: return {"n": 0, "expected_n": 0, "coverage": 0, "complete": False, "issues": ["no_data"]}
++    tail = bars[-min(50, len(bars)):]
++    cov = sum(float(b.get("coverage", 1.0)) for b in tail) / len(tail)
++    dup = len({b["t"] for b in tail}) != len(tail)
++    return {"n": len(bars), "expected_n": len(bars), "coverage": round(cov, 4),
++            "complete": cov >= .90 and not dup, "issues": ["duplicate_timestamp"] if dup else ([] if cov >= .90 else ["incomplete_resample"])}
++
++
++def build(symbol, tfs, now):
++    regimes = {tf: regime.classify(a) for tf, a in tfs.items() if a.get("enough")}
++    alignment = mtf.summarize(symbol, tfs, regimes)
++    target_tf = "H4" if (tfs.get("H4") or {}).get("enough") else next(iter(regimes), None)
++    a = tfs.get(target_tf) or {}; health = _health(a)
++    fq = fvg_quality.best(a, regimes.get(target_tf, {}), alignment, health)
++    conf = confidence.score(regimes.get(target_tf, {}), alignment, fq, health)
++    return {"version": 21, "mode": "live", "updated_ts": now, "symbol": symbol, "primary_tf": target_tf,
++            "regime": regimes, "mtf": alignment, "liquidity": liqmap.build(a), "fvg_quality": fq,
++            "confidence": conf, "data_health": health,
++            "glossary": {"TRANSITION": "CHoCH/character shift; direction not settled", "COMPRESSION": "low volatility/range contraction",
++                         "price-level proxy": "OHLC-derived level, not proof of resting orders"}}
+diff -ruN baseline/engine/intel/confidence.py package/getergeter-autofib-v2-v22/engine/intel/confidence.py
+--- baseline/engine/intel/confidence.py	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/engine/intel/confidence.py	2026-11-12 10:00:38.238680755 +0000
+@@ -0,0 +1,15 @@
++"""Context score; deliberately not a win-probability claim."""
++def score(regime, mtf, fvg, data_health):
++    components = {"regime": min(25, regime.get("score", 0) * .25), "mtf": mtf.get("alignment", 0) * .30,
++                  "fvg": fvg.get("score", 0) * .30, "data_health": data_health.get("coverage", 0) * 15}
++    penalties = {"tf_conflict": 12 if mtf.get("conflict") else 0,
++                 "transition": 8 if regime.get("state") == "TRANSITION" else 0,
++                 "compression": 6 if regime.get("state") == "COMPRESSION" else 0,
++                 "no_fvg": 10 if not fvg.get("zone") else 0,
++                 "poor_data": 15 if not data_health.get("complete") else 0}
++    value = round(max(0, min(100, sum(components.values()) - sum(penalties.values()))), 1)
++    d = mtf.get("direction")
++    decision = ("BUY_WATCH" if d == "bull" and value >= 55 else "SELL_WATCH" if d == "bear" and value >= 55
++                else "MIXED_WATCH" if value >= 45 else "NO_EDGE")
++    return {"value": value, "label": "context score (not win probability)", "decision": decision,
++            "components": {k: round(v, 1) for k, v in components.items()}, "penalties": penalties}
+diff -ruN baseline/engine/intel/fvg_quality.py package/getergeter-autofib-v2-v22/engine/intel/fvg_quality.py
+--- baseline/engine/intel/fvg_quality.py	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/engine/intel/fvg_quality.py	2026-11-12 10:00:38.237680758 +0000
+@@ -0,0 +1,18 @@
++"""Explainable 0–100 FVG context score."""
++def best(analysis, regime, mtf, data_health):
++    zones = analysis.get("fvg") or []
++    if not zones: return {"score": 0, "grade": "D", "zone": None, "factors": {"no_fvg": 0}}
++    z = zones[-1]; direction = z.get("dir")
++    factors = {
++        "mtf_alignment": 20 if mtf.get("direction") == direction else 8 if mtf.get("direction") == "mixed" else 0,
++        "liquidity_sweep": 15 if any(s.get("dir") == direction for s in (analysis.get("sweeps") or [])[-8:]) else 0,
++        "displacement": 20 if any(e.get("dir") == direction and e.get("displacement") for e in (analysis.get("events") or [])[-5:]) else 7,
++        "regime": 15 if regime.get("direction") == direction else 5,
++        "freshness": 10 if z.get("status") == "active" else 4,
++        "active_leg_location": 10 if analysis.get("premium_discount") in (("discount" if direction == "bull" else "premium"),) else 4,
++        "formation_session": 5,
++        "data_integrity": 5 if data_health.get("complete") else round(5 * data_health.get("coverage", 0), 1),
++    }
++    score = round(sum(factors.values()), 1)
++    grade = "A+" if score >= 90 else "A" if score >= 80 else "B" if score >= 70 else "C" if score >= 55 else "D"
++    return {"score": score, "grade": grade, "zone": z, "factors": factors}
+diff -ruN baseline/engine/intel/liqmap.py package/getergeter-autofib-v2-v22/engine/intel/liqmap.py
+--- baseline/engine/intel/liqmap.py	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/engine/intel/liqmap.py	2026-11-12 10:00:38.237680758 +0000
+@@ -0,0 +1,33 @@
++"""Daily/weekly/session OHLC liquidity proxies with explicit lifecycle."""
++from datetime import datetime, timezone
++
++
++def _status(level, side, bars, born):
++    later = [b for b in bars if b["t"] > born]
++    for b in later:
++        if side == "high" and b["c"] > level or side == "low" and b["c"] < level:
++            return "BROKEN"
++        if side == "high" and b["h"] > level or side == "low" and b["l"] < level:
++            return "SWEPT"
++    return "INTACT"
++
++
++def build(analysis):
++    bars = analysis.get("_bars") or []
++    if not bars: return []
++    groups = {}
++    for b in bars:
++        dt = datetime.fromtimestamp(b["t"], timezone.utc)
++        groups.setdefault((dt.year, dt.timetuple().tm_yday), []).append(b)
++    days = sorted(groups)
++    levels = []
++    if len(days) >= 2:
++        prev = groups[days[-2]]; born = prev[-1]["t"]
++        for name, level, side in (("PDH", max(b["h"] for b in prev), "high"), ("PDL", min(b["l"] for b in prev), "low")):
++            levels.append({"name": name, "price": level, "kind": "price-level proxy", "status": _status(level, side, bars, born)})
++    recent = bars[-min(len(bars), 7 * 24):]
++    if recent:
++        born = recent[0]["t"]
++        for name, level, side in (("PWH", max(b["h"] for b in recent), "high"), ("PWL", min(b["l"] for b in recent), "low")):
++            levels.append({"name": name, "price": level, "kind": "price-level proxy", "status": _status(level, side, bars, born)})
++    return levels
+diff -ruN baseline/engine/intel/mtf.py package/getergeter-autofib-v2-v22/engine/intel/mtf.py
+--- baseline/engine/intel/mtf.py	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/engine/intel/mtf.py	2026-11-12 10:00:38.236680762 +0000
+@@ -0,0 +1,19 @@
++"""Transparent multi-timeframe structure alignment."""
++
++def summarize(symbol, tfs, regimes):
++    order = [tf for tf in (("D", "H4", "H1", "M15") if symbol != "XAUUSD" else ("D", "H4", "H1", "M15"))
++             if (tfs.get(tf) or {}).get("enough")]
++    if symbol == "XAUUSD" and not (tfs.get("D") or {}).get("enough"):
++        order = [tf for tf in ("H4", "H1", "M15") if (tfs.get(tf) or {}).get("enough")]
++    rows, bull, bear = [], 0.0, 0.0
++    weights = {"D": 4, "H4": 3, "H1": 2, "M15": 1}
++    total = sum(weights.get(tf, 1) for tf in order) or 1
++    for tf in order:
++        r = regimes.get(tf, {})
++        d, w = r.get("direction", "neutral"), weights.get(tf, 1)
++        bull += w if d == "bull" else 0; bear += w if d == "bear" else 0
++        rows.append({"tf": tf, "direction": d, "regime": r.get("state"), "weight": w})
++    bs, br = round(100 * bull / total, 1), round(100 * bear / total, 1)
++    direction = "bull" if bs >= 65 else "bear" if br >= 65 else "mixed"
++    return {"hierarchy": rows, "bull_score": bs, "bear_score": br, "alignment": max(bs, br), "direction": direction,
++            "conflict": bs >= 25 and br >= 25, "top_tf": order[0] if order else None}
+diff -ruN baseline/engine/intel/regime.py package/getergeter-autofib-v2-v22/engine/intel/regime.py
+--- baseline/engine/intel/regime.py	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/engine/intel/regime.py	2026-11-12 10:00:38.235680765 +0000
+@@ -0,0 +1,38 @@
++"""Multi-factor market-regime classification (descriptive, not predictive)."""
++
++def _pct_rank(values, x):
++    v = sorted(z for z in values if z is not None)
++    return 0.5 if not v else sum(z <= x for z in v) / len(v)
++
++
++def classify(analysis, lookback=100):
++    bars, atr = analysis.get("_bars") or [], analysis.get("_atr14") or []
++    if len(bars) < 20:
++        return {"state": "DATA_INSUFFICIENT", "direction": "neutral", "score": 0, "why": ["Candle belum cukup"]}
++    closes = [b["c"] for b in bars]
++    w = min(lookback, len(bars) - 1)
++    net, path = closes[-1] - closes[-1 - w], sum(abs(closes[i] - closes[i - 1]) for i in range(len(closes) - w, len(closes)))
++    er = abs(net) / path if path else 0.0
++    av = atr[-1] if atr and atr[-1] else bars[-1]["h"] - bars[-1]["l"]
++    ap = _pct_rank(atr[-lookback:], av)
++    recent = bars[-20:]
++    width = max(b["h"] for b in recent) - min(b["l"] for b in recent)
++    prev = bars[-40:-20] or recent
++    prev_width = max(b["h"] for b in prev) - min(b["l"] for b in prev)
++    expand = width / max(prev_width, 1e-12)
++    ev = (analysis.get("events") or [])[-1:] or []
++    direction = ev[0]["dir"] if ev else ("bull" if net > 0 else "bear" if net < 0 else "neutral")
++    choch = bool(ev and ev[0].get("type") == "CHoCH")
++    if choch:
++        state = "TRANSITION"
++    elif er >= .38 and ap >= .65 and expand >= 1.15:
++        state = "BULLISH EXPANSION" if direction == "bull" else "BEARISH EXPANSION"
++    elif er >= .30:
++        state = "BULLISH TREND" if direction == "bull" else "BEARISH TREND"
++    elif ap <= .30 and expand <= .9:
++        state = "COMPRESSION"
++    else:
++        state = "RANGE"
++    return {"state": state, "direction": direction, "score": round(min(100, er * 160 + ap * 25), 1),
++            "metrics": {"efficiency_ratio": round(er, 4), "atr_percentile": round(ap, 4), "range_expansion": round(expand, 4)},
++            "why": [f"Directional efficiency {er:.2f}", f"ATR percentile {ap:.0%}", f"Range expansion {expand:.2f}x"]}
+diff -ruN baseline/engine/main.py package/getergeter-autofib-v2-v22/engine/main.py
+--- baseline/engine/main.py	2026-11-12 10:07:30.551434736 +0000
++++ package/getergeter-autofib-v2-v22/engine/main.py	2026-11-12 10:06:44.962624400 +0000
+@@ -1,4 +1,6 @@
+-"""Engine utama (GitHub Actions cron tiap 5 menit) – v19.
++"""Engine utama (GitHub Actions cron tiap 5 menit) – v22.
++v22: Auto Fib v2 lifecycle + extension + previous Fib + cluster + persistent Fib history.
++v21: Phase 1 Market Intelligence live, non-blocking.
+ v19: Auto Fibonacci (H4 utama + Fib lokal per TF), MODE MONITOR (BUY/SELL dinonaktifkan sementara; engine
+      mengirim kejadian/setup untuk dicek manual), antrean Telegram + retry + log status per pesan,
+      catatan run (trigger & durasi) untuk memantau scheduler.
+@@ -30,6 +32,8 @@
+ from binance import Binance
+ from charts import render
+ from data_source import fetch_candles, fetch_history
++from fib_journal import FibJournal
++from intel import build as build_intelligence
+ from journal import Journal, stats
+ from orderflow import book_metrics, flow_summary, trade_metrics
+ from resample import TF_SEC, closed_only, resample, upsert
+@@ -243,6 +247,14 @@
+             tfs[tf] = an
+         ov = overall(tfs, d)
+         fib_primary = (tfs.get(config.FIB_PRIMARY_TF) or {}).get("fib")
++        intel = None
++        if config.INTEL_ENABLED:
++            try:
++                intel = build_intelligence(sym, tfs, self.now)
++                jsave(os.path.join(self.store, "intel", f"{sym}.json"), intel)
++                jsave(os.path.join(self.site, "data", f"intel_{sym}.json"), intel)
++            except Exception as e:      # intelligence is deliberately non-blocking
++                self.warnings.append(f"Intel {sym} gagal: {e.__class__.__name__}: {e}")
+ 
+         # ----- jurnal permanen: setup semua TF + entry top-down, lalu nilai hasilnya -----
+         jr = Journal(self.store, sym)
+@@ -257,6 +269,13 @@
+                           "setups": {tf: stats([r for r in pub["setups"] if r["tf"] == tf]) for tf in tfs_list}})
+         jsave(os.path.join(self.site, "data", f"journal_{sym}.json"), pub)
+ 
++        # ----- Auto Fib v2: lifecycle history is immutable and persists across runs -----
++        fj = FibJournal(self.store, sym)
++        fib_new = fj.merge(tfs, self.now)
++        fj.save()
++        fib_pub = fj.public()
++        jsave(os.path.join(self.site, "data", f"fib_history_{sym}.json"), fib_pub)
++
+         # ----- chart JSON: SELURUH candle & overlay tersimpan (tidak dipotong) -----
+         for tf in tfs_list:
+             a = tfs[tf]
+@@ -304,7 +323,9 @@
+         ov_small = {k: v for k, v in ov.items() if k != "entries"}
+         pair = {"market": market, "digits": d, "price": round(price, d), "last_ts": src[-1]["t"],
+                 "received": received, "counts": {tf: len(stores[tf][-config.STORE_LIMIT[tf]:]) for tf in tfs_list},
+-                "tf": tfs_small, "overall": ov_small, "journal": pub["stats"], "fib_primary": fib_primary, **extra}
++                "tf": tfs_small, "overall": ov_small, "journal": pub["stats"], "fib_primary": fib_primary,
++                "fib_history": {"events": len(fib_pub["events"]), "cycles": len(fib_pub["cycles"]),
++                                "new": len(fib_new)}, "intel": intel, **extra}
+         if config.SIGNALS_ON:
+             self.alerts(sym, pair, new_setups, new_entries, jr.closed_now)
+             self.zone_alerts(sym, pair, tfs)
+diff -ruN baseline/engine/messages.py package/getergeter-autofib-v2-v22/engine/messages.py
+--- baseline/engine/messages.py	2026-11-12 10:07:30.551434736 +0000
++++ package/getergeter-autofib-v2-v22/engine/messages.py	2026-11-12 09:59:47.715895465 +0000
+@@ -115,10 +115,16 @@
+         return f"{prefix}Fib: belum ada impuls valid"
+     bull = fb["dir"] == "bull"
+     g = fb.get("gold") or [None, None]
+-    return (f"{prefix}Fib {fb['tf']} {'🟢 bullish' if bull else '🔴 bearish'} ({fb['scope']}"
+-            f"{', invalid' if fb.get('status') == 'invalid' else ''}): 100% {f(fb['anchor100']['price'], d)} → "
+-            f"0% {f(fb['anchor0']['price'], d)} · retrace {fb.get('retrace') if fb.get('retrace') is not None else '-'}%"
+-            f" ({fb.get('zone') or '-'}) · zona 50–61.8 {f(g[0], d)}–{f(g[1], d)}")
++    status = str(fb.get("status") or "FORMING").upper()
++    ext = ""
++    if status == "EXTENDED":
++        ext = " · EXT " + ", ".join(f"{x['notation']}={f(x['price'], d)}" for x in (fb.get("extensions") or []))
++    prev = " · Fib sebelumnya tersimpan" if fb.get("previous") else ""
++    cluster = " · " + ", ".join(z.get("label", "Fib cluster") for z in fb.get("clusters") or []) if fb.get("clusters") else ""
++    return (f"{prefix}Fib {fb['tf']} {'🟢 bullish' if bull else '🔴 bearish'} [{status}] ({fb['scope']}): "
++            f"100% {f(fb['anchor100']['price'], d)} → 1.0/0% {f(fb['anchor0']['price'], d)} · "
++            f"retrace {fb.get('retrace') if fb.get('retrace') is not None else '-'}%"
++            f" ({fb.get('zone') or '-'}) · zona 50–61.8 {f(g[0], d)}–{f(g[1], d)}{ext}{prev}{cluster}")
+ 
+ 
+ def monitor_text(st):
+diff -ruN baseline/engine/monitor.py package/getergeter-autofib-v2-v22/engine/monitor.py
+--- baseline/engine/monitor.py	2026-11-12 10:07:30.551434736 +0000
++++ package/getergeter-autofib-v2-v22/engine/monitor.py	2026-11-12 09:58:15.952242005 +0000
+@@ -7,6 +7,9 @@
+   OB_NEW          Order Block baru terbentuk                  (default: hanya dicatat)
+   HTF_FIB         harga menyentuh level Fib utama (H4) 38.2 / 50 / 61.8 / 78.6 – sekali per siklus fib
+   LOCAL_FIB       harga menyentuh Fib lokal M15 50 / 61.8 / 78.6 (default: hanya dicatat)
++  FIB_LOCKED      pivot ujung + retrace 23,6% mengunci anchor
++  FIB_EXTENDED    close melewati 1.0 mengaktifkan target extension
++  FIB_REPLACED    HL→HH / LH→LL lengkap; Fib baru mengganti Fib lama
+   FIB_INVALID     close menembus 100% Fib utama (H4)
+   OB_FVG_OVERLAP  harga retest area overlap OB + FVG searah
+   CONFLUENCE      retest POI (OB/FVG) M15 searah Fib H4 & berada di area H4 38.2–78.6, skor:
+@@ -24,9 +27,11 @@
+ from resample import TF_SEC
+ 
+ ICON = {"STRUCTURE": "🔄", "SWEEP": "💧", "FVG_NEW": "▫️", "OB_NEW": "▪️", "HTF_FIB": "📐", "LOCAL_FIB": "📏",
+-        "FIB_INVALID": "❌", "OB_FVG_OVERLAP": "🧱", "CONFLUENCE": "⭐", "HTF_POI": "🎯"}
++        "FIB_LOCKED": "🔒", "FIB_EXTENDED": "🚀", "FIB_REPLACED": "♻️", "FIB_INVALID": "❌",
++        "OB_FVG_OVERLAP": "🧱", "CONFLUENCE": "⭐", "HTF_POI": "🎯"}
+ NAME = {"STRUCTURE": "Struktur", "SWEEP": "Sweep liquidity", "FVG_NEW": "FVG baru", "OB_NEW": "Order Block baru",
+-        "HTF_FIB": "Fib utama", "LOCAL_FIB": "Fib lokal", "FIB_INVALID": "Fib invalid",
++        "HTF_FIB": "Fib utama", "LOCAL_FIB": "Fib lokal", "FIB_LOCKED": "Fib locked",
++        "FIB_EXTENDED": "Fib extended", "FIB_REPLACED": "Fib replaced", "FIB_INVALID": "Fib invalid",
+         "OB_FVG_OVERLAP": "OB + FVG overlap", "CONFLUENCE": "Confluence", "HTF_POI": "HTF POI"}
+ FIB_TOUCH = {"HTF_FIB": (0.382, 0.5, 0.618, 0.786), "LOCAL_FIB": (0.5, 0.618, 0.786)}
+ MAX_SCORE = 6
+@@ -168,7 +173,7 @@
+             # ---- FIB touch (utama & lokal) ----
+             for typ, fget, lab in (("HTF_FIB", htf, config.FIB_PRIMARY_TF), ("LOCAL_FIB", loc, tf)):
+                 f = fget(j - 1)
+-                if not f or not f["valid"]:
++                if not f or not f["valid"] or f.get("status") not in ("LOCKED", "EXTENDED"):
+                     continue
+                 key = (typ, f["id"])
+                 hit = None
+@@ -187,14 +192,24 @@
+                          f"Level {_pct(r)} = {_r(lv, d)} · {'low' if bull else 'high'} candle {_r(b['l'] if bull else b['h'], d)}",
+                          "Retracement " + ("turun dari swing high" if bull else "naik dari swing low")],
+                         rid=f"MN:{typ}:{f['id']}:{r}", fib_id=f["id"], ratio=r, level=_r(lv, d))
+-            # ---- FIB utama invalid ----
+-            fp, fc = htf(j - 1), htf(j)
+-            if fp and fc and fp["leg_id"] == fc["leg_id"] and fp["valid"] and not fc["valid"]:
+-                bull = fc["dir"] == "bull"
+-                add(j, "FIB_INVALID", fc["dir"], f"Fib {config.FIB_PRIMARY_TF} invalid",
+-                    [f"Close {'di bawah' if bull else 'di atas'} 100% "
+-                     f"({_r(fc['lo'] if bull else fc['hi'], d)}) – impuls batal, tunggu leg baru"],
+-                    rid=f"MN:FIBINV:{fc['leg_id']}")
++            # ---- Auto Fib v2 lifecycle (primary H4 + local monitor TF) ----
++            labels = {
++                "FIB_LOCKED": "LOCKED – anchor dikunci",
++                "FIB_EXTENDED": "EXTENDED – close melewati 1.0",
++                "FIB_REPLACED": "REPLACED – Fib baru aktif",
++                "FIB_INVALID": "INVALID – close menembus 100%",
++            }
++            for lab, fget in ((config.FIB_PRIMARY_TF, htf), (tf, loc)):
++                fs = fget(j)
++                for fe in (fs or {}).get("events") or []:
++                    typ = fe.get("type")
++                    if typ not in labels:
++                        continue
++                    add(j, typ, fe.get("dir") or fs["dir"], f"Fib {lab} {labels[typ]}",
++                        [fe.get("description") or labels[typ],
++                         f"Status {fs.get('status')} · scope swing · break 1.0/100% dinilai dengan close"],
++                        rid=f"MN:{fe['id']}", fib_id=fs.get("id"), previous_id=fe.get("previous_id"),
++                        status=fs.get("status"), quiet=False)
+             # ---- POI retest: overlap & confluence ----
+             for kind, z in pois:
+                 if not alive(z, j) or z["created"] >= j - 1:
+diff -ruN baseline/engine/resample.py package/getergeter-autofib-v2-v22/engine/resample.py
+--- baseline/engine/resample.py	2026-11-12 10:07:30.551434736 +0000
++++ package/getergeter-autofib-v2-v22/engine/resample.py	2026-11-12 10:00:05.695829235 +0000
+@@ -26,6 +26,9 @@
+ 
+ 
+ def resample(bars, tf, market="forex"):
++    steps = sorted(bars[i]["t"] - bars[i - 1]["t"] for i in range(1, len(bars)) if bars[i]["t"] > bars[i - 1]["t"])
++    source_step = steps[len(steps) // 2] if steps else TF_SEC.get(tf, 60)
++    expected = max(1, int(round(TF_SEC[tf] / max(source_step, 1))))
+     out = {}
+     for b in bars:
+         k = bucket_start(b["t"], tf, market)
+@@ -43,7 +46,13 @@
+             for v in VOL_KEYS:
+                 if v in b:
+                     cur[v] = cur.get(v, 0) + b[v]
+-    return [out[k] for k in sorted(out)]
++    rows = [out[k] for k in sorted(out)]
++    for row in rows:
++        row["source_step"] = source_step
++        row["expected_n"] = expected
++        row["coverage"] = round(min(1.0, row.get("n", 0) / expected), 4)
++        row["complete"] = row["coverage"] >= 1.0
++    return rows
+ 
+ 
+ def upsert(store, new, covered_from=None):
+diff -ruN baseline/tests/test_autofib_v2.py package/getergeter-autofib-v2-v22/tests/test_autofib_v2.py
+--- baseline/tests/test_autofib_v2.py	1970-01-01 00:00:00.000000000 +0000
++++ package/getergeter-autofib-v2-v22/tests/test_autofib_v2.py	2026-11-12 10:02:30.344211018 +0000
+@@ -0,0 +1,114 @@
++import json
++import os
++import sys
++import tempfile
++import unittest
++
++ROOT = os.path.dirname(os.path.dirname(__file__))
++sys.path.insert(0, os.path.join(ROOT, "engine"))
++
++import fibo  # noqa: E402
++from fib_journal import FibJournal  # noqa: E402
++
++
++def bar(t, o, h, l, c):
++    return {"t": t, "o": o, "h": h, "l": l, "c": c}
++
++
++BARS = [
++    bar(0, 101, 102, 100, 101),
++    bar(60, 101, 108, 101, 107),
++    bar(120, 107, 110, 106, 109),
++    bar(180, 109, 109, 108, 108.5),
++    bar(240, 108.5, 109, 107.5, 108),       # endpoint confirmed + 25% pullback => LOCKED
++    bar(300, 108, 111, 106, 109.5),         # wick > 1.0, but close does not extend
++    bar(360, 109.5, 112, 109, 111),         # close > 1.0 => EXTENDED; HL=106
++    bar(420, 111, 113, 110.5, 112),         # new HH
++    bar(480, 112, 112.5, 110, 111),         # >=23.6% pullback, only 1 confirm candle
++    bar(540, 111, 112, 110.5, 111),         # k=2 => new Fib LOCKED + old REPLACED
++    bar(600, 111, 112, 104, 105),           # close below new 100% => INVALID
++]
++SEED = {"seed_id": "FIB2:bull:0:120", "dir": "bull", "i": 2, "origin_i": 0, "ext_i": 2,
++        "lo": 100, "hi": 110, "event": {"t": 120, "label": "BOS", "type": "BOS", "level": 108}}
++
++
++class AutoFibV2Tests(unittest.TestCase):
++    def states(self, bars=BARS):
++        return fibo.lifecycle_series(bars, [SEED], k_confirm=2, min_retrace=.236)
++
++    def test_lock_requires_confirmation_and_retrace(self):
++        s = self.states()
++        self.assertEqual(s[3]["status"], "FORMING")
++        self.assertEqual(s[4]["status"], "LOCKED")
++        self.assertIn("FIB_LOCKED", [e["type"] for e in s[4]["events"]])
++        self.assertEqual(s[4]["hi"], 110)
++
++    def test_break_uses_close_not_wick(self):
++        s = self.states()
++        self.assertGreater(BARS[5]["h"], 110)
++        self.assertEqual(s[5]["status"], "LOCKED")
++        self.assertEqual(s[6]["status"], "EXTENDED")
++        self.assertIn("FIB_EXTENDED", [e["type"] for e in s[6]["events"]])
++
++    def test_replacement_waits_for_complete_hl_hh(self):
++        before = fibo.lifecycle_series(BARS[:9], [SEED], 2, min_retrace=.236)
++        self.assertEqual(before[8]["status"], "EXTENDED")
++        s = self.states()
++        self.assertEqual(s[9]["status"], "LOCKED")
++        self.assertNotEqual(s[9]["id"], SEED["seed_id"])
++        self.assertEqual(s[9]["origin_i"], 5)
++        self.assertEqual(s[9]["ext_i"], 7)
++        self.assertEqual(s[9]["previous"]["status"], "REPLACED")
++        types = [e["type"] for e in s[9]["events"]]
++        self.assertIn("FIB_REPLACED", types)
++
++    def test_invalidation_uses_close_and_keeps_previous(self):
++        s = self.states()
++        self.assertEqual(s[10]["status"], "INVALID")
++        self.assertEqual(s[10]["previous"]["status"], "REPLACED")
++        self.assertIn("FIB_INVALID", [e["type"] for e in s[10]["events"]])
++
++    def test_extension_prices_use_approved_notation(self):
++        expected = {1.236: 112.36, 1.382: 113.82, 1.618: 116.18, 2.236: 122.36, 2.618: 126.18}
++        for x, price in expected.items():
++            self.assertAlmostEqual(fibo.extension_price("bull", 110, 100, x), price, places=8)
++
++    def test_no_lookahead_prefix_invariance(self):
++        full = self.states()
++        for end in range(3, len(BARS) + 1):
++            prefix = fibo.lifecycle_series(BARS[:end], [SEED], 2, min_retrace=.236)
++            j = end - 1
++            for key in ("id", "status", "origin_i", "ext_i", "lo", "hi"):
++                self.assertEqual(prefix[j][key], full[j][key], (end, key))
++
++    def test_cluster_overlap(self):
++        active = {"gold": [106, 107], "levels": [], "extensions": []}
++        previous = {"gold": [106.5, 108], "levels": [{"price": 106.8, "notation": "61.8%"}], "extensions": []}
++        z = fibo._clusters(active, previous, 2)
++        self.assertTrue(any(x["kind"] == "gold_overlap" for x in z))
++        self.assertTrue(any(x["kind"] == "level_overlap" for x in z))
++
++    def test_journal_is_idempotent_and_persistent(self):
++        s = self.states()
++        hist = []
++        for j, snap in s.items():
++            for ev in snap.get("events") or []:
++                hist.append({"id": ev["id"], "event": ev, "fib": {
++                    "id": snap["id"], "tf": "H4", "dir": snap["dir"], "scope": "swing", "status": snap["status"],
++                    "anchor100": {"t": BARS[snap["origin_i"]]["t"], "price": snap["lo"]},
++                    "anchor0": {"t": BARS[snap["ext_i"]]["t"], "price": snap["hi"]}}})
++        with tempfile.TemporaryDirectory() as td:
++            a = {"_fib_history": hist}
++            j = FibJournal(td, "TEST")
++            first = j.merge({"H4": a}, 1); j.save()
++            again = FibJournal(td, "TEST")
++            second = again.merge({"H4": a}, 2); again.save()
++            self.assertGreater(len(first), 0)
++            self.assertEqual(second, [])
++            with open(os.path.join(td, "fib", "TEST.json"), encoding="utf-8") as fh:
++                data = json.load(fh)
++            self.assertEqual(len(data["events"]), len(first))
++
++
++if __name__ == "__main__":
++    unittest.main()

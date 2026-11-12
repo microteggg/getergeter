@@ -1,0 +1,14 @@
+{
+  "package": "getergeter-phase1-v21-autofib-v2-v22",
+  "version": "v22-auto-fib-v2",
+  "built_at": "2026-11-12T16:51:20+07:00",
+  "base": "Phase 1 v21 live plus supplied repository source snapshot",
+  "checks": {
+    "python_compile": "PASS",
+    "javascript_syntax": "PASS",
+    "workflow_yaml": "PASS",
+    "unit_tests": "8/8 PASS",
+    "offline_simulation": "PASS",
+    "strict_json": "PASS"
+  }
+}
