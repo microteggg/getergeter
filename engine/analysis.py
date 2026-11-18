@@ -16,7 +16,6 @@ from indicators import ma, rsi, atr
 from resample import TF_SEC
 from smc import model, premium_discount_at
 from zones import build_zones
-import fibo
 
 _DROP = ("created", "index", "pivot_index", "last_index", "tol", "event_id", "hist", "start", "end_i")
 
@@ -85,7 +84,7 @@ def _empty(result):
                   swing_structure=None, setup=None, checklist=[], reason="Data belum cukup.",
                   events=[], sweeps=[], liquidity=[], liquidity_done=[], fvg=[], ob=[], fvg_mit=[], ob_mit=[],
                   pd_zones=[], strong_weak=[], zones=[], dealing_range=None, atr=None, atr14=None,
-                  atr200=None, atr200_ready=False, setups=[], fib=None, _on=[], _setups={}, _times=[], _closes=[],
+                   atr200=None, atr200_ready=False, setups=[], _on=[], _setups={}, _times=[], _closes=[],
                   series={"times": [], "ma20": [], "ma50": [], "ma200": []})
     return result
 
@@ -219,7 +218,8 @@ def analyze_tf(tf, closed, price, digits):
         eq_threshold=config.EQUAL_LIQ_ATR, displacement_atr=config.DISPLACEMENT_ATR,
         displacement_body_ratio=config.DISPLACEMENT_BODY_RATIO, fvg_mode=config.FVG_MODE,
         fvg_atr_threshold=config.FVG_ATR_THRESHOLD, fvg_auto_multiplier=config.FVG_AUTO_MULTIPLIER,
-        fvg_min_body_ratio=config.FVG_MIN_BODY_RATIO, ob_lookback=config.OB_LOOKBACK,
+        fvg_min_body_ratio=config.FVG_MIN_BODY_RATIO, fvg_auto_lookback=config.FVG_AUTO_LOOKBACK,
+        ob_lookback=config.OB_LOOKBACK, ob_boundary_mode=config.OB_BOUNDARY_MODE,
         sequence_window=config.SEQUENCE_WINDOW)
 
     sc = _Scanner(tf, bars, smc, atr14, digits)
@@ -242,9 +242,6 @@ def analyze_tf(tf, closed, price, digits):
     reason = (f"SETUP {signal}: {setup['model']} → retrace → target {setup['target']['label']}." if setup else
               "WAIT: sequence, retrace POI, lokasi dealing range, target, atau RR belum lengkap.")
     lb = bars[-1]
-    # v19: Auto Fibonacci TF ini (anchor dari leg BOS/CHoCH, lihat fibo.py)
-    fib_pub, fib_legs, fib_series = fibo.build(bars, smc, atr14, tf, digits, price)
-    fib_history = fib_pub.pop("_history", []) if fib_pub else []
     pools_active = [dict(p, label=p["label"]) for p in smc["liquidity"]]
     result.update(
         trend=trend, structure=sdir or idir, internal_structure=idir, swing_structure=sdir,
@@ -264,10 +261,10 @@ def analyze_tf(tf, closed, price, digits):
         fvg=_zl(smc["fvg"], digits), ob=_zl(smc["order_blocks"], digits),
         fvg_mit=_zl(smc["fvg_mit"], digits), ob_mit=_zl(smc["ob_mitigated"], digits),
         pd_zones=_zl(smc["pd_zones"], digits), strong_weak=_zl(smc["strong_weak"], digits),
-        setups=first, zones=zones, fib=fib_pub,
+        setups=first, zones=zones,
         # internal (tidak ditulis ke state.json): dipakai decide() & journal
         _on=on, _setups=setups, _times=[b["t"] for b in bars], _closes=[b["c"] for b in bars],
-        _bars=bars, _smc=smc, _atr14=atr14, _fib_series=fib_series, _fib_history=fib_history,
+        _bars=bars, _smc=smc, _atr14=atr14,
         series={"times": [b["t"] for b in bars], "ma20": ma20, "ma50": ma50, "ma200": ma200},
     )
     return result

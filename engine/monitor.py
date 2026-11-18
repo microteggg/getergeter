@@ -5,17 +5,9 @@ Dipindai pada MONITOR_TF (default M15), hanya candle tertutup, tanpa lookahead:
   SWEEP           sweep liquidity swing / EQH / EQL
   FVG_NEW         FVG baru terbentuk                         (default: hanya dicatat)
   OB_NEW          Order Block baru terbentuk                  (default: hanya dicatat)
-  HTF_FIB         harga menyentuh level Fib utama (H4) 38.2 / 50 / 61.8 / 78.6 – sekali per siklus fib
-  LOCAL_FIB       harga menyentuh Fib lokal M15 50 / 61.8 / 78.6 (default: hanya dicatat)
-  FIB_LOCKED      pivot ujung + retrace 23,6% mengunci anchor
-  FIB_EXTENDED    close melewati 1.0 mengaktifkan target extension
-  FIB_REPLACED    HL→HH / LH→LL lengkap; Fib baru mengganti Fib lama
-  FIB_INVALID     close menembus 100% Fib utama (H4)
   OB_FVG_OVERLAP  harga retest area overlap OB + FVG searah
-  CONFLUENCE      retest POI (OB/FVG) M15 searah Fib H4 & berada di area H4 38.2–78.6, skor:
-                    POI di H4 50–61.8 +2 (38.2–78.6 +1) · Fib M15 50–78.6 +1 · OB+FVG overlap +1
-                    sweep searah <= MONITOR_SWEEP_WINDOW candle +1 · BOS/CHoCH searah terbaru +1   (maks 6)
-Fib yang dipakai pada candle j = fib yang sudah diketahui pada close candle j-1 (tidak memakai candle j).
+  CONFLUENCE      retest POI M15: OB+FVG overlap +2 · POI kontekstual +1 · lokasi PD +1
+                    sweep searah <= MONITOR_SWEEP_WINDOW candle +1 · struktur searah terbaru +1 (maks 6)
 Kejadian disimpan permanen di store/monitor/{SYM}.json (tidak pernah diubah kecuali status notif).
 """
 import json
@@ -23,26 +15,17 @@ import os
 from bisect import bisect_left
 
 import config
-import fibo
 from resample import TF_SEC
 
-ICON = {"STRUCTURE": "🔄", "SWEEP": "💧", "FVG_NEW": "▫️", "OB_NEW": "▪️", "HTF_FIB": "📐", "LOCAL_FIB": "📏",
-        "FIB_LOCKED": "🔒", "FIB_EXTENDED": "🚀", "FIB_REPLACED": "♻️", "FIB_INVALID": "❌",
+ICON = {"STRUCTURE": "🔄", "SWEEP": "💧", "FVG_NEW": "▫️", "OB_NEW": "▪️",
         "OB_FVG_OVERLAP": "🧱", "CONFLUENCE": "⭐", "HTF_POI": "🎯"}
 NAME = {"STRUCTURE": "Struktur", "SWEEP": "Sweep liquidity", "FVG_NEW": "FVG baru", "OB_NEW": "Order Block baru",
-        "HTF_FIB": "Fib utama", "LOCAL_FIB": "Fib lokal", "FIB_LOCKED": "Fib locked",
-        "FIB_EXTENDED": "Fib extended", "FIB_REPLACED": "Fib replaced", "FIB_INVALID": "Fib invalid",
         "OB_FVG_OVERLAP": "OB + FVG overlap", "CONFLUENCE": "Confluence", "HTF_POI": "HTF POI"}
-FIB_TOUCH = {"HTF_FIB": (0.382, 0.5, 0.618, 0.786), "LOCAL_FIB": (0.5, 0.618, 0.786)}
 MAX_SCORE = 6
 
 
 def _r(v, d):
     return None if v is None else round(v, d)
-
-
-def _pct(r):
-    return f"{r * 100:g}%"
 
 
 def _ovl(a_bot, a_top, b_bot, b_top):
@@ -76,22 +59,6 @@ class Monitor:
         smc, atr = m["_smc"], m["_atr14"]
         sec, d, n = TF_SEC[tf], digits, len(bars)
         start = max(2, n - config.MONITOR_LOOKBACK)
-        loc_ser = m["_fib_series"](start - 1)
-
-        P = tfs.get(config.FIB_PRIMARY_TF) or {}
-        pbars, psec = P.get("_bars") or [], TF_SEC.get(config.FIB_PRIMARY_TF, 14400)
-        pclose = [b["t"] + psec for b in pbars]
-        p0 = max(0, fibo.index_at(pclose, bars[start - 1]["t"] + sec) - 1) if pbars else 0
-        pser = P["_fib_series"](p0) if pbars else {}
-
-        def htf(j):
-            if not pbars:
-                return None
-            h = fibo.index_at(pclose, bars[j]["t"] + sec)
-            return fibo.lite(pser.get(h), pbars, h) if h >= 0 else None
-
-        def loc(j):
-            return fibo.lite(loc_ser.get(j), bars, j)
 
         ev_at, sw_at = {}, {}
         for e in smc.get("events") or []:
@@ -108,12 +75,6 @@ class Monitor:
         def alive(z, j):
             return z["created"] < j and (z.get("end_i") is None or z["end_i"] >= j)
 
-        # kedalaman fib yang sudah tercatat per siklus (agar tiap level hanya sekali)
-        depth = {}
-        for r in self.events.values():
-            if r["type"] in FIB_TOUCH and r.get("fib_id"):
-                depth[(r["type"], r["fib_id"])] = max(depth.get((r["type"], r["fib_id"]), 0), r.get("ratio", 0))
-
         def add(j, typ, dirn, title, why, **kw):
             rid = kw.pop("rid")
             quiet = kw.pop("quiet", False)
@@ -125,12 +86,6 @@ class Monitor:
                    "price": _r(b["c"], d), "title": title, "why": why,
                    "src": "live" if close_t >= now - 2 * sec else "replay", "first_seen": now}
             rec.update({k: v for k, v in kw.items() if v is not None})
-            h = htf(j)
-            if h:
-                rt = fibo.retrace_of(h["dir"], h["hi"], h["lo"], b["c"])
-                rec["htf"] = {"tf": config.FIB_PRIMARY_TF, "dir": h["dir"], "scope": h["scope"],
-                              "hi": _r(h["hi"], d), "lo": _r(h["lo"], d), "valid": h["valid"],
-                              "retrace": None if rt is None else round(rt * 100, 1)}
             notify = (typ in config.MONITOR_NOTIFY and rec["src"] == "live" and not self.first_run and not quiet)
             if typ == "HTF_POI" and rec.get("stage") not in config.HTF_POI_STAGES:
                 notify = False
@@ -170,46 +125,6 @@ class Monitor:
                     f"{'Bullish' if z['dir'] == 'bull' else 'Bearish'} {tag} terbentuk",
                     [f"Area {_r(z['bottom'], d)} – {_r(z['top'], d)}"],
                     rid=f"MN:NEW:{z['id']}", top=_r(z["top"], d), bottom=_r(z["bottom"], d), kind=tag)
-            # ---- FIB touch (utama & lokal) ----
-            for typ, fget, lab in (("HTF_FIB", htf, config.FIB_PRIMARY_TF), ("LOCAL_FIB", loc, tf)):
-                f = fget(j - 1)
-                if not f or not f["valid"] or f.get("status") not in ("LOCKED", "EXTENDED"):
-                    continue
-                key = (typ, f["id"])
-                hit = None
-                for r in FIB_TOUCH[typ]:
-                    lv = fibo.price_at(f["dir"], f["hi"], f["lo"], r)
-                    if (f["dir"] == "bull" and b["l"] <= lv) or (f["dir"] == "bear" and b["h"] >= lv):
-                        hit = (r, lv)
-                if hit and hit[0] > depth.get(key, 0):
-                    r, lv = hit
-                    depth[key] = r
-                    bull = f["dir"] == "bull"
-                    zone = " – zona utama 50–61.8" if r in fibo.GOLD else ""
-                    add(j, typ, f["dir"], f"{lab} Fib {_pct(r)} tersentuh{zone}",
-                        [f"Fib {lab} {'bullish' if bull else 'bearish'} ({f['scope']}): "
-                         f"100% {_r(f['lo'] if bull else f['hi'], d)} → 0% {_r(f['hi'] if bull else f['lo'], d)}",
-                         f"Level {_pct(r)} = {_r(lv, d)} · {'low' if bull else 'high'} candle {_r(b['l'] if bull else b['h'], d)}",
-                         "Retracement " + ("turun dari swing high" if bull else "naik dari swing low")],
-                        rid=f"MN:{typ}:{f['id']}:{r}", fib_id=f["id"], ratio=r, level=_r(lv, d))
-            # ---- Auto Fib v2 lifecycle (primary H4 + local monitor TF) ----
-            labels = {
-                "FIB_LOCKED": "LOCKED – anchor dikunci",
-                "FIB_EXTENDED": "EXTENDED – close melewati 1.0",
-                "FIB_REPLACED": "REPLACED – Fib baru aktif",
-                "FIB_INVALID": "INVALID – close menembus 100%",
-            }
-            for lab, fget in ((config.FIB_PRIMARY_TF, htf), (tf, loc)):
-                fs = fget(j)
-                for fe in (fs or {}).get("events") or []:
-                    typ = fe.get("type")
-                    if typ not in labels:
-                        continue
-                    add(j, typ, fe.get("dir") or fs["dir"], f"Fib {lab} {labels[typ]}",
-                        [fe.get("description") or labels[typ],
-                         f"Status {fs.get('status')} · scope swing · break 1.0/100% dinilai dengan close"],
-                        rid=f"MN:{fe['id']}", fib_id=fs.get("id"), previous_id=fe.get("previous_id"),
-                        status=fs.get("status"), quiet=False)
             # ---- POI retest: overlap & confluence ----
             for kind, z in pois:
                 if not alive(z, j) or z["created"] >= j - 1:
@@ -232,31 +147,15 @@ class Monitor:
                         [f"{tag} {_r(z['bottom'], d)}–{_r(z['top'], d)} ∩ FVG {_r(z2['bottom'], d)}–{_r(z2['top'], d)}",
                          f"Area overlap {_r(bot, d)} – {_r(top, d)}"],
                         rid=f"MN:OVL:{z['id']}:{z2['id']}", top=_r(top, d), bottom=_r(bot, d))
-                # confluence: wajib searah Fib utama & POI di area H4 38.2–78.6
-                h = htf(j - 1)
-                if not h or not h["valid"] or h["dir"] != dirn:
-                    continue
-                g50, g618 = (fibo.price_at(dirn, h["hi"], h["lo"], r) for r in (0.5, 0.618))
-                w382, w786 = (fibo.price_at(dirn, h["hi"], h["lo"], r) for r in (0.382, 0.786))
+                # confluence struktural berbasis POI canonical
                 pts, why = 0, []
-                if _ovl(z["bottom"], z["top"], min(g50, g618), max(g50, g618)):
-                    pts += 2
-                    why.append([True, f"POI di zona {config.FIB_PRIMARY_TF} Fib 50–61.8 ({_r(min(g50, g618), d)}–{_r(max(g50, g618), d)})", 2])
-                elif _ovl(z["bottom"], z["top"], min(w382, w786), max(w382, w786)):
-                    pts += 1
-                    why.append([True, f"POI di area {config.FIB_PRIMARY_TF} Fib 38.2–78.6", 1])
-                else:
-                    continue
-                lf = loc(j - 1)
-                if lf and lf["valid"] and lf["dir"] == dirn:
-                    a50, a786 = (fibo.price_at(dirn, lf["hi"], lf["lo"], r) for r in (0.5, 0.786))
-                    ok = _ovl(z["bottom"], z["top"], min(a50, a786), max(a50, a786))
-                    pts += ok
-                    why.append([ok, f"Fib {tf} searah, POI di 50–78.6" if ok else f"Fib {tf} searah, POI di luar 50–78.6", int(ok)])
-                else:
-                    why.append([False, f"Fib {tf} belum searah", 0])
-                pts += bool(partner)
-                why.append([bool(partner), "OB + FVG overlap" if partner else "Tanpa overlap OB/FVG", int(bool(partner))])
+                overlap_pts = 2 if partner else 0
+                pts += overlap_pts
+                why.append([bool(partner), "OB + FVG overlap" if partner else "Tanpa overlap OB/FVG", overlap_pts])
+                contextual = bool(z.get("context"))
+                pts += contextual
+                why.append([contextual, "POI berasal dari sequence sweep → displacement → break" if contextual
+                            else "POI tidak terikat sequence canonical", int(contextual)])
                 x = bisect_left(sw_idx, j - config.MONITOR_SWEEP_WINDOW)
                 sw = next((s for i in sw_idx[x:] if i <= j for s in sw_at[i] if s["dir"] == dirn), None)
                 pts += bool(sw)
@@ -268,21 +167,26 @@ class Monitor:
                 pts += ok
                 why.append([ok, f"Struktur terakhir {last_e['label']} {'bullish' if last_e['dir'] == 'bull' else 'bearish'}"
                             if last_e else "Belum ada struktur", int(ok)])
+                disp = bool(last_e and last_e["dir"] == dirn and
+                            (last_e.get("displacement") or last_e.get("leg_displacement")))
+                pts += disp
+                why.append([disp, "Break searah memiliki displacement" if disp else
+                            "Break searah belum memiliki displacement", int(disp)])
                 if pts < config.MONITOR_CONFLUENCE_MIN or (j, dirn) in conf_seen:
                     continue
                 conf_seen.add((j, dirn))
                 add(j, "CONFLUENCE", dirn, f"{'Bullish' if bull else 'Bearish'} confluence {pts}/{MAX_SCORE} – retest {tag}",
                     [f"{'✅' if ok_ else '➖'} {t}" for ok_, t, _ in why],
-                    rid=f"MN:CONF:{z['id']}:{h['id']}", top=_r(z["top"], d), bottom=_r(z["bottom"], d),
+                    rid=f"MN:CONF:{z['id']}:{bars[j]['t']}", top=_r(z["top"], d), bottom=_r(z["bottom"], d),
                     score=pts, max_score=MAX_SCORE, kind=tag + ("+FVG" if partner and kind == "OB" else "+OB" if partner else ""))
         # ---- v20: HTF POI (FVG/OB H4) -> CHoCH M15 searah -> BOS M15 (konfirmasi) ----
         if config.HTF_POI_ENABLED:
-            self._htf_poi(tfs, bars, smc, atr, sec, d, add, htf, times)
+            self._htf_poi(tfs, bars, smc, atr, sec, d, add, times)
         self.new.sort(key=lambda r: (r["close_t"], r["type"]))
         return self.new
 
     # ------------------------------------------------------------------ v20: HTF POI
-    def _htf_poi(self, tfs, bars, smc, atr, sec, d, add, htf, times):
+    def _htf_poi(self, tfs, bars, smc, atr, sec, d, add, times):
         """Harga M15 masuk POI H4 (FVG / OB) -> CHoCH/iCHoCH M15 searah POI -> BOS/iBOS M15 searah.
 
         Tanpa lookahead: zona H4 baru dipakai setelah candle H4 pembentuknya CLOSE; zona INVALID saat
@@ -340,7 +244,7 @@ class Monitor:
         m15_ob = (smc.get("order_blocks") or []) + (smc.get("ob_mitigated") or [])
 
         def ctx(j, dirn, leg_from=None):
-            """Konteks pesan: tren H4, target (POI H4 lawan + level Fib H4), POI M15 di leg."""
+            """Konteks pesan: tren H4, target POI H4 lawan, dan POI M15 di leg."""
             bull, px = dirn == "bull", bars[j]["c"]
             tr = h4_trend(j)
             tg = []
@@ -350,12 +254,6 @@ class Monitor:
                 edge = z["bottom"] if bull else z["top"]
                 if (bull and edge > px) or (not bull and edge < px):
                     tg.append((abs(edge - px), f"{'Bear' if bull else 'Bull'} {z['tag']} {htf_tf}", edge))
-            f = htf(j)
-            if f and f["valid"]:
-                for r in (0.0, 0.382, 0.5, 0.618, 0.786, 1.0):
-                    lv = fibo.price_at(f["dir"], f["hi"], f["lo"], r)
-                    if (bull and lv > px) or (not bull and lv < px):
-                        tg.append((abs(lv - px), f"Fib {config.FIB_PRIMARY_TF} {r * 100:g}%", lv))
             tg.sort(key=lambda x: x[0])
             targets, seen = [], set()
             for _, lab, lv in tg:
@@ -525,11 +423,6 @@ def message(sym, rec, digits, price_now):
         lines.append(escape(w) if w[:1] in ("✅", "➖") else "• " + escape(w))
     if rec.get("bottom") is not None:
         lines.append(f"Area: {f(rec['bottom'], digits)} – {f(rec['top'], digits)}")
-    h = rec.get("htf")
-    if h and rec["type"] != "HTF_FIB":
-        lines.append(f"Fib {h['tf']}: {'bullish' if h['dir'] == 'bull' else 'bearish'} "
-                     f"{f(h['lo'], digits)}–{f(h['hi'], digits)} · retrace {h['retrace'] if h['retrace'] is not None else '-'}%"
-                     + ("" if h["valid"] else " (invalid)"))
     lines += ["", f"Close candle: {f(rec['price'], digits)} · sekarang {f(price_now, digits)}",
               f"Candle: {wib(rec['t'], '%d/%m %H:%M')}",
               "", "📋 Kejadian dicatat untuk cek manual – <b>bukan sinyal entry</b>."]
@@ -552,10 +445,6 @@ def _message_htf(sym, rec, digits, price_now, escape, wib, f):
         lines.append("")
         lines.append(f"Swing {config.HTF_POI_TF}: " + ("🟢 bullish" if tr == "bull" else "🔴 bearish" if tr == "bear" else "⚪ belum ada")
                      + (" ⚠️ counter-trend (reaksi, bukan reversal HTF)" if rec.get("counter") else " ✅ searah"))
-        h = rec.get("htf")
-        if h:
-            lines.append(f"Fib {h['tf']}: {'bullish' if h['dir'] == 'bull' else 'bearish'} {f(h['lo'], digits)}–{f(h['hi'], digits)}"
-                         f" · retrace {h['retrace'] if h['retrace'] is not None else '-'}%" + ("" if h["valid"] else " (invalid)"))
         tg = rec.get("targets") or []
         if tg:
             lines.append("<b>" + ("Resistance / target" if bull else "Support / target") + "</b>")

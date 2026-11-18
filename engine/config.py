@@ -77,7 +77,7 @@ LARGE_TRADE_USD = float(_get("LARGE_TRADE_USD", "0"))
 STORE_LIMIT = {"M1": 4400, "M5": 6000, "M15": 4000, "H1": 4000, "H4": 3000, "D": 2000, "W": 1000}
 CHART_BARS = dict(STORE_LIMIT)
 JOURNAL_SETUP_LIMIT = int(_get("JOURNAL_SETUP_LIMIT", "3000"))   # per TF; entry tidak dibatasi
-ENGINE_VERSION = "v22-auto-fib-v2"
+ENGINE_VERSION = "v22-poi-audit"
 
 # ---------- Strategi top-down ----------
 BIAS_TF = _get("BIAS_TF", "H4")
@@ -123,6 +123,9 @@ EQUAL_LIQ_ATR = float(_get("EQUAL_LIQ_ATR", "0.10"))
 DISPLACEMENT_ATR = float(_get("DISPLACEMENT_ATR", "0.80"))
 DISPLACEMENT_BODY_RATIO = float(_get("DISPLACEMENT_BODY_RATIO", "0.60"))
 OB_LOOKBACK = int(_get("OB_LOOKBACK", "5"))
+OB_BOUNDARY_MODE = _get("OB_BOUNDARY_MODE", "WICK").upper()
+if OB_BOUNDARY_MODE not in ("WICK", "BODY"):
+    OB_BOUNDARY_MODE = "WICK"
 SEQUENCE_WINDOW = int(_get("SEQUENCE_WINDOW", "12"))
 MAX_VISUAL_ZONES = int(_get("MAX_VISUAL_ZONES", "12"))
 
@@ -132,6 +135,8 @@ if FVG_MODE not in ("ATR", "AUTO", "HYBRID"):
 FVG_ATR_THRESHOLD = float(_get("FVG_ATR_THRESHOLD", "0.10"))
 FVG_AUTO_MULTIPLIER = float(_get("FVG_AUTO_MULTIPLIER", "2.00"))
 FVG_MIN_BODY_RATIO = float(_get("FVG_MIN_BODY_RATIO", "0.50"))
+FVG_AUTO_LOOKBACK = int(_get("FVG_AUTO_LOOKBACK", "50"))
+POI_HISTORY_LIMIT = int(_get("POI_HISTORY_LIMIT", "20000"))  # zona selesai per TF; zona aktif tidak dipangkas
 
 POI_PROXIMITY_ATR = float(_get("POI_PROXIMITY_ATR", "0.15"))
 SL_BUFFER_ATR = float(_get("SL_BUFFER_ATR", "0.10"))
@@ -166,14 +171,6 @@ if SIGNAL_MODE not in ("monitor", "signal"):
     SIGNAL_MODE = "monitor"
 SIGNALS_ON = SIGNAL_MODE == "signal"
 
-# ---------- v22: Auto Fibonacci v2 (fibo.py) ----------
-FIB_ENABLED = _bool("FIB_ENABLED", True)
-FIB_PRIMARY_TF = _get("FIB_PRIMARY_TF", "H4").upper()        # Fib utama (tebal) – tampil di semua TF
-FIB_MIN_ATR = float(_get("FIB_MIN_ATR", "1.0"))              # leg impuls minimal N x ATR14 TF tsb
-FIB_LOCK_RETRACE = float(_get("FIB_LOCK_RETRACE", "0.236"))  # pullback minimum sebelum LOCKED/replacement
-FIB_FALLBACK_INTERNAL = False                                  # v2: internal tidak pernah mengganti Fib utama
-FIB_HISTORY_LIMIT = int(_get("FIB_HISTORY_LIMIT", "10000"))  # lifecycle events per pair (persisten)
-
 # ---------- Phase 1 v21: Market Intelligence (live, non-blocking) ----------
 INTEL_ENABLED = _bool("INTEL_ENABLED", True)
 INTEL_MODE = _get("INTEL_MODE", "live").lower()
@@ -189,9 +186,9 @@ MONITOR_SWEEP_WINDOW = int(_get("MONITOR_SWEEP_WINDOW", "12"))   # sweep dihitun
 MONITOR_CONFLUENCE_MIN = int(_get("MONITOR_CONFLUENCE_MIN", "4"))  # skor minimum (maks 6)
 MONITOR_INTERNAL_STRUCTURE = _bool("MONITOR_INTERNAL_STRUCTURE", False)  # iBOS/iCHoCH ikut dicatat
 # Tipe kejadian yang dikirim ke Telegram (lainnya hanya dicatat di dashboard):
-#   STRUCTURE, SWEEP, FVG_NEW, OB_NEW, HTF_FIB, LOCAL_FIB, FIB_INVALID, OB_FVG_OVERLAP, CONFLUENCE
+#   STRUCTURE, SWEEP, FVG_NEW, OB_NEW, OB_FVG_OVERLAP, CONFLUENCE
 #   HTF_POI (v20)
-MONITOR_NOTIFY = _list("MONITOR_NOTIFY", "STRUCTURE,SWEEP,HTF_FIB,OB_FVG_OVERLAP,CONFLUENCE,HTF_POI,FIB_LOCKED,FIB_EXTENDED,FIB_REPLACED,FIB_INVALID")
+MONITOR_NOTIFY = _list("MONITOR_NOTIFY", "STRUCTURE,SWEEP,OB_FVG_OVERLAP,CONFLUENCE,HTF_POI")
 
 # ---------- v20: HTF POI -> CHoCH LTF (monitor.py) ----------
 # Harga MONITOR_TF masuk FVG/OB HTF_POI_TF -> CHoCH/iCHoCH searah -> BOS/iBOS lanjutan.

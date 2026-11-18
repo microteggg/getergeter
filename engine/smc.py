@@ -156,27 +156,35 @@ def liquidity(bars, pivot_sets, atr200, threshold):
 
 
 # ---------------------------------------------------------------- POI
-def order_block(bars, event, lookback):
-    """OB = candle berlawanan terakhir sebelum impuls yang menghasilkan break."""
+def order_block(bars, event, lookback, boundary_mode="WICK"):
+    """OB = candle berlawanan TERAKHIR sebelum displacement pada leg break.
+
+    Zona tidak dibuat bila leg tidak mempunyai displacement atau tidak ada candle
+    berlawanan dalam lookback. Ini mencegah candle searah/fallback ekstrem diberi
+    label OB. ``created`` tetap pada candle break karena zona baru diketahui saat
+    break terkonfirmasi.
+    """
     lo, hi = event["pivot_index"], event["index"]
-    if hi <= lo:
+    impulse = event.get("impulse_index")
+    if hi <= lo or impulse is None or impulse <= lo:
         return None
     bull = event["dir"] == "bull"
-    leg = range(lo, hi)
-    origin = (min(leg, key=lambda j: (bars[j]["l"], -j)) if bull
-              else max(leg, key=lambda j: (bars[j]["h"], j)))
-    sel = origin
-    for j in range(origin, max(-1, origin - lookback - 1), -1):
-        b = bars[j]
-        if (bull and b["c"] < b["o"]) or (not bull and b["c"] > b["o"]):
-            sel = j
-            break
+    start = max(lo, impulse - max(1, int(lookback)))
+    sel = next((j for j in range(impulse - 1, start - 1, -1)
+                if (bull and bars[j]["c"] < bars[j]["o"]) or
+                   (not bull and bars[j]["c"] > bars[j]["o"])), None)
+    if sel is None:
+        return None
     b = bars[sel]
+    mode = str(boundary_mode or "WICK").upper()
+    top, bottom = ((max(b["o"], b["c"]), min(b["o"], b["c"])) if mode == "BODY"
+                   else (b["h"], b["l"]))
     return {
         "id": f"OB:{event['scope']}:{event['dir']}:{b['t']}", "dir": event["dir"],
-        "scope": event["scope"], "kind": "OB", "t": b["t"], "top": b["h"], "bottom": b["l"],
-        "mid": (b["h"] + b["l"]) / 2, "created": event["index"], "event_id": event["id"],
+        "scope": event["scope"], "kind": "OB", "t": b["t"], "top": top, "bottom": bottom,
+        "mid": (top + bottom) / 2, "created": event["index"], "event_id": event["id"],
         "event_t": event["t"], "event_type": event["type"], "context": False,
+        "boundary_mode": mode.lower(), "impulse_t": bars[impulse]["t"],
     }
 
 
@@ -189,22 +197,22 @@ def bar_step(bars):
     return diffs[len(diffs) // 2] if diffs else 0
 
 
-def fair_value_gaps(bars, atr200, mode, atr_threshold, auto_multiplier, min_body_ratio, skip_session_gap=True):
+def fair_value_gaps(bars, atr200, mode, atr_threshold, auto_multiplier, min_body_ratio,
+                    auto_lookback=50, skip_session_gap=True):
     """FVG 3 candle. Diabaikan bila melintasi celah sesi/weekend (durasi > 3 candle normal)."""
     mode = str(mode or "HYBRID").upper()
     step = bar_step(bars)
-    body = [_body_pct(b) for b in bars]
-    cumulative, out = 0.0, []
+    body = [abs(b["c"] - b["o"]) for b in bars]
+    out = []
     for i, value in enumerate(body):
         if i < 2:
-            cumulative += value
             continue
         first, middle, cur = bars[i - 2], bars[i - 1], bars[i]
-        auto_threshold = cumulative / i * auto_multiplier
+        prior = body[max(0, i - 1 - max(2, int(auto_lookback))):i - 1]
+        auto_threshold = (sum(prior) / len(prior) * auto_multiplier) if prior else float("inf")
         mid_ratio = abs(middle["c"] - middle["o"]) / max(middle["h"] - middle["l"], _EPS)
         direction = None
         if skip_session_gap and step and cur["t"] - first["t"] > 3 * step:
-            cumulative += value
             continue
         if cur["l"] > first["h"]:
             direction, top, bottom, close_break = "bull", cur["l"], first["h"], middle["c"] > first["h"]
@@ -213,7 +221,7 @@ def fair_value_gaps(bars, atr200, mode, atr_threshold, auto_multiplier, min_body
         if direction:
             gap = top - bottom
             atr_pass = gap >= atr_threshold * max(_at(atr200, i), _EPS) and mid_ratio >= min_body_ratio
-            auto_pass = close_break and body[i - 1] > auto_threshold
+            auto_pass = close_break and body[i - 1] >= auto_threshold and mid_ratio >= min_body_ratio
             ok = atr_pass if mode == "ATR" else auto_pass if mode == "AUTO" else (atr_pass or auto_pass)
             if ok:
                 out.append({
@@ -223,7 +231,6 @@ def fair_value_gaps(bars, atr200, mode, atr_threshold, auto_multiplier, min_body
                     "filter_mode": "ATR+AUTO" if atr_pass and auto_pass else "ATR" if atr_pass else "AUTO",
                     "gap_atr200": gap / max(_at(atr200, i), _EPS),
                 })
-        cumulative += value
     return out
 
 
@@ -231,8 +238,13 @@ def ob_state(zone, bars):
     """Aktif sampai CLOSE menembus sisi jauh (invalid). Status: fresh/tapped/CE/deep."""
     touched = ce = deep = invalid = None
     bull = zone["dir"] == "bull"
+    depth = 0.0
+    height = max(zone["top"] - zone["bottom"], _EPS)
     for i in range(zone["created"] + 1, len(bars)):
         b = bars[i]
+        penetration = ((zone["top"] - b["l"]) / height if bull else
+                       (b["h"] - zone["bottom"]) / height)
+        depth = max(depth, min(1.0, max(0.0, penetration)))
         if touched is None and b["l"] <= zone["top"] and b["h"] >= zone["bottom"]:
             touched = i
         if ce is None and ((bull and b["l"] <= zone["mid"]) or (not bull and b["h"] >= zone["mid"])):
@@ -244,7 +256,11 @@ def ob_state(zone, bars):
             break
     status = ("invalid" if invalid is not None else "deep" if deep is not None else
               "CE" if ce is not None else "tapped" if touched is not None else "fresh")
-    out = dict(zone, status=status, touch_t=bars[touched]["t"] if touched is not None else None, end_i=invalid)
+    out = dict(zone, status=status, touch_t=bars[touched]["t"] if touched is not None else None,
+               ce_t=bars[ce]["t"] if ce is not None else None,
+               deep_t=bars[deep]["t"] if deep is not None else None,
+               mitigation_pct=round(depth * 100, 1), age=max(0, len(bars) - 1 - zone["created"]),
+               end_i=invalid)
     if invalid is not None:
         out["end_t"] = bars[invalid]["t"]
     return out, invalid is None
@@ -254,15 +270,23 @@ def fvg_state(zone, bars):
     """Aktif sampai gap terisi penuh (wick mencapai sisi jauh)."""
     touched = filled = None
     bull = zone["dir"] == "bull"
+    depth = 0.0
+    height = max(zone["top"] - zone["bottom"], _EPS)
     for i in range(zone["created"] + 1, len(bars)):
         b = bars[i]
+        penetration = ((zone["top"] - b["l"]) / height if bull else
+                       (b["h"] - zone["bottom"]) / height)
+        depth = max(depth, min(1.0, max(0.0, penetration)))
         if touched is None and b["l"] <= zone["top"] and b["h"] >= zone["bottom"]:
             touched = i
         if (bull and b["l"] <= zone["bottom"]) or (not bull and b["h"] >= zone["top"]):
             filled = i
             break
     out = dict(zone, status="filled" if filled is not None else "tapped" if touched is not None else "fresh",
-               touch_t=bars[touched]["t"] if touched is not None else None, end_i=filled)
+               touch_t=bars[touched]["t"] if touched is not None else None,
+               filled_t=bars[filled]["t"] if filled is not None else None,
+               mitigation_pct=round(depth * 100, 1), age=max(0, len(bars) - 1 - zone["created"]),
+               end_i=filled)
     if filled is not None:
         out["end_t"] = bars[filled]["t"]
     return out, filled is None
@@ -322,7 +346,8 @@ def _flip_index(events, seq_event):
 
 def model(bars, *, atr14, atr200, internal_len, swing_len, eq_threshold, displacement_atr,
           displacement_body_ratio, fvg_mode, fvg_atr_threshold, fvg_auto_multiplier,
-          fvg_min_body_ratio, ob_lookback, sequence_window, max_visual_zones=None):
+           fvg_min_body_ratio, fvg_auto_lookback, ob_lookback, ob_boundary_mode,
+           sequence_window, max_visual_zones=None):
     empty = {"trend": None, "internal_trend": None, "swing_trend": None, "liquidity": [],
              "sweeps": [], "events": [], "fvg": [], "fvg_mit": [], "order_blocks": [],
              "ob_mitigated": [], "sequences": [], "dealing_range": None, "pd_zones": [],
@@ -340,13 +365,18 @@ def model(bars, *, atr14, atr200, internal_len, swing_len, eq_threshold, displac
 
     obs, ob_by_event, seen = [], {}, set()
     for e in events:
-        z = order_block(bars, e, ob_lookback)
+        e["impulse_index"] = next((j for j in range(max(0, e["pivot_index"] + 1), e["index"] + 1)
+                                   if is_displacement(bars[j], e["dir"], _at(atr14, j),
+                                                      displacement_atr, displacement_body_ratio)), None)
+        e["leg_displacement"] = e["impulse_index"] is not None
+        z = order_block(bars, e, ob_lookback, ob_boundary_mode)
         if z and z["id"] not in seen:
             seen.add(z["id"])
             obs.append(z)
             ob_by_event[e["id"]] = z
 
-    fvgs = fair_value_gaps(bars, atr200, fvg_mode, fvg_atr_threshold, fvg_auto_multiplier, fvg_min_body_ratio)
+    fvgs = fair_value_gaps(bars, atr200, fvg_mode, fvg_atr_threshold, fvg_auto_multiplier,
+                           fvg_min_body_ratio, fvg_auto_lookback)
 
     pools, pools_done, sweeps = liquidity(
         bars, [("internal", internal_len, i_highs, i_lows), ("swing", swing_len, s_highs, s_lows)],

@@ -43,7 +43,7 @@ def mark(ok):
 def help_text(st):
     lines = ["🤖 <b>Daftar command</b>", "",
              "/status – cek sistem & kuota", "/price – harga terakhir",
-             "/signal – " + ("sinyal" if config.SIGNALS_ON else "ringkasan monitoring + Auto Fibonacci"),
+             "/signal – " + ("sinyal" if config.SIGNALS_ON else "ringkasan monitoring FVG/OB"),
              "/events – kejadian/setup terakhir (mode monitoring)",
              "/lastupdate – data terakhir yang diambil", "/riwayat – statistik riwayat entry (backtest)", ""]
     for s in st["pairs"]:
@@ -110,31 +110,14 @@ def _setup_lines(s, d):
             f"Entry {f(s['entry'], d)} · SL {f(s['sl'], d)} · TP1 {f(s['tp1'], d)} · TP2 {f(s['tp2'], d)}"]
 
 
-def fib_line(fb, d, prefix=""):
-    if not fb:
-        return f"{prefix}Fib: belum ada impuls valid"
-    bull = fb["dir"] == "bull"
-    g = fb.get("gold") or [None, None]
-    status = str(fb.get("status") or "FORMING").upper()
-    ext = ""
-    if status == "EXTENDED":
-        ext = " · EXT " + ", ".join(f"{x['notation']}={f(x['price'], d)}" for x in (fb.get("extensions") or []))
-    prev = " · Fib sebelumnya tersimpan" if fb.get("previous") else ""
-    cluster = " · " + ", ".join(z.get("label", "Fib cluster") for z in fb.get("clusters") or []) if fb.get("clusters") else ""
-    return (f"{prefix}Fib {fb['tf']} {'🟢 bullish' if bull else '🔴 bearish'} [{status}] ({fb['scope']}): "
-            f"100% {f(fb['anchor100']['price'], d)} → 1.0/0% {f(fb['anchor0']['price'], d)} · "
-            f"retrace {fb.get('retrace') if fb.get('retrace') is not None else '-'}%"
-            f" ({fb.get('zone') or '-'}) · zona 50–61.8 {f(g[0], d)}–{f(g[1], d)}{ext}{prev}{cluster}")
-
-
 def monitor_text(st):
     lines = ["👁 <b>MONITORING (sinyal BUY/SELL nonaktif)</b>"]
     for sym, p in st["pairs"].items():
         d = p["digits"]
         mtf = (st.get("monitor") or {}).get("tf", "M15")
-        loc = (p["tf"].get(mtf) or {}).get("fib")
+        a = p["tf"].get(mtf) or {}
         lines += ["", f"{PAIR_ICON.get(sym, '•')} <b>{sym}</b>  {f(p.get('price'), d)}",
-                  fib_line(p.get("fib_primary"), d), fib_line(loc, d)]
+                  f"{mtf}: FVG aktif {len(a.get('fvg') or [])} · OB aktif {len(a.get('ob') or [])}"]
         mon = p.get("monitor")
         if mon and mon.get("last"):
             r = mon["last"][-1]
@@ -191,9 +174,8 @@ def pair_text(sym, p):
         if not a.get("enough"):
             lines.append(f"{tf:>3}: ⚪ data belum cukup ({a.get('bars', 0)}/{a.get('need', '-')} candle)")
             continue
-        fb = a.get("fib")
         tail = (ICON.get(a.get("signal", "WAIT"), "") if config.SIGNALS_ON else
-                f"Fib {fb['retrace']}%" if fb and fb.get("retrace") is not None else "Fib -")
+                f"FVG {len(a.get('fvg') or [])} · OB {len(a.get('ob') or [])}")
         lines.append(f"{tf:>3}: {trend_icon(a.get('trend'))} {short(a.get('trend'))} | RSI {a.get('rsi')} | {tail}")
     a = p["tf"].get(config.SETUP_TF, {})
     if a.get("enough"):
@@ -237,8 +219,6 @@ def pair_text(sym, p):
     if js:
         lines += ["", f"<b>Riwayat entry</b>: {js['total']} · selesai {js['closed']} · winrate "
                       f"{js['winrate'] if js['winrate'] is not None else '-'}% · net {js['net_r']:+}R"]
-    lines += ["", "<b>Auto Fibonacci</b>", fib_line(p.get("fib_primary"), d),
-              fib_line((p["tf"].get(config.MONITOR_TF) or {}).get("fib"), d)]
     if not config.SIGNALS_ON:
         lines += ["", "👁 <b>Mode monitoring</b> – sinyal BUY/SELL nonaktif. Lihat /events."]
         return "\n".join(lines)

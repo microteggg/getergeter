@@ -1,8 +1,8 @@
-"""Engine utama (GitHub Actions cron tiap 5 menit) – v22.
-v22: Auto Fib v2 lifecycle + extension + previous Fib + cluster + persistent Fib history.
+"""Engine utama (GitHub Actions cron tiap 5 menit) – v22 POI audit.
+v22 POI audit: FVG/OB canonical + persistent lifecycle history.
 v21: Phase 1 Market Intelligence live, non-blocking.
-v19: Auto Fibonacci (H4 utama + Fib lokal per TF), MODE MONITOR (BUY/SELL dinonaktifkan sementara; engine
-     mengirim kejadian/setup untuk dicek manual), antrean Telegram + retry + log status per pesan,
+v19: MODE MONITOR (BUY/SELL dinonaktifkan sementara; engine mengirim kejadian/setup untuk dicek manual),
+     antrean Telegram + retry + log status per pesan,
      catatan run (trigger & durasi) untuk memantau scheduler.
 v18 (zone engine: Sweep Reversal + CHoCH Retest, notif zona).
 
@@ -32,10 +32,10 @@ from analysis import analyze_tf, overall
 from binance import Binance
 from charts import render
 from data_source import fetch_candles, fetch_history
-from fib_journal import FibJournal
 from intel import build as build_intelligence
 from journal import Journal, stats
 from orderflow import book_metrics, flow_summary, trade_metrics
+from poi_journal import PoiJournal
 from resample import TF_SEC, closed_only, resample, upsert
 from telegram_notify import send_message, send_photo
 
@@ -246,7 +246,6 @@ class Engine:
             series[tf] = an.pop("series", {})
             tfs[tf] = an
         ov = overall(tfs, d)
-        fib_primary = (tfs.get(config.FIB_PRIMARY_TF) or {}).get("fib")
         intel = None
         if config.INTEL_ENABLED:
             try:
@@ -269,16 +268,17 @@ class Engine:
                           "setups": {tf: stats([r for r in pub["setups"] if r["tf"] == tf]) for tf in tfs_list}})
         jsave(os.path.join(self.site, "data", f"journal_{sym}.json"), pub)
 
-        # ----- Auto Fib v2: lifecycle history is immutable and persists across runs -----
-        fj = FibJournal(self.store, sym)
-        fib_new = fj.merge(tfs, self.now)
-        fj.save()
-        fib_pub = fj.public()
-        jsave(os.path.join(self.site, "data", f"fib_history_{sym}.json"), fib_pub)
+        # ----- riwayat FVG/OB persisten: origin boleh keluar dari rolling store -----
+        pj = PoiJournal(self.store, sym)
+        poi_new = pj.merge(tfs, closed, self.now)
+        pj.save()
+        poi_pub = pj.public()
+        jsave(os.path.join(self.site, "data", f"poi_history_{sym}.json"), poi_pub)
 
         # ----- chart JSON: SELURUH candle & overlay tersimpan (tidak dipotong) -----
         for tf in tfs_list:
             a = tfs[tf]
+            ph = (poi_pub.get("tf") or {}).get(tf, {})
             rows, ma_idx = [], {}
             vol = market == "crypto"
             for i, b in enumerate(stores[tf][-config.CHART_BARS[tf]:]):
@@ -301,13 +301,13 @@ class Engine:
                 "v": 2, "symbol": sym, "market": market, "tf": tf, "digits": d,
                 "cols": ["t", "o", "h", "l", "c"] + (["v", "bv", "tc"] if vol else []) + ["forming"],
                 "rows": rows, **mas,
-                **{k: a.get(k, []) for k in ("events", "sweeps", "fvg", "ob", "fvg_mit", "ob_mit",
-                                               "liquidity", "liquidity_done", "pd_zones", "strong_weak", "zones")},
+                **{k: a.get(k, []) for k in ("events", "sweeps", "liquidity", "liquidity_done",
+                                                "pd_zones", "strong_weak", "zones")},
+                **{k: ph.get(k, []) for k in ("fvg", "ob", "fvg_mit", "ob_mit")},
                 "setup": a.get("setup") if config.SIGNALS_ON else None,
                 "signal": a.get("signal") if config.SIGNALS_ON else None,
-                "mode": config.SIGNAL_MODE,
-                "fib_primary": fib_primary, "fib_local": a.get("fib") if tf != config.FIB_PRIMARY_TF else None})
-            self.render_png(sym, tf, stores[tf], a, series[tf], d, market, fib_primary)
+                "mode": config.SIGNAL_MODE})
+            self.render_png(sym, tf, stores[tf], dict(a, **ph), series[tf], d, market)
 
         tfs_small = {}
         for tf, a in tfs.items():
@@ -315,17 +315,19 @@ class Engine:
             for k in ("events", "sweeps", "liquidity"):
                 q[k] = a.get(k, [])[-STATE_TAIL:]
             for k in ("fvg", "ob"):
-                q[k] = a.get(k, [])[-6:]
-            q["fvg_mit"], q["ob_mit"] = [], []
+                q[k] = a.get(k, [])[-12:]
+            q["fvg_mit"], q["ob_mit"] = a.get("fvg_mit", [])[-12:], a.get("ob_mit", [])[-12:]
             q["zones"] = [{k: v for k, v in z.items() if k != "events"}
                           for z in a.get("zones", []) if not z.get("end_t")][-8:]
             tfs_small[tf] = q
         ov_small = {k: v for k, v in ov.items() if k != "entries"}
         pair = {"market": market, "digits": d, "price": round(price, d), "last_ts": src[-1]["t"],
                 "received": received, "counts": {tf: len(stores[tf][-config.STORE_LIMIT[tf]:]) for tf in tfs_list},
-                "tf": tfs_small, "overall": ov_small, "journal": pub["stats"], "fib_primary": fib_primary,
-                "fib_history": {"events": len(fib_pub["events"]), "cycles": len(fib_pub["cycles"]),
-                                "new": len(fib_new)}, "intel": intel, **extra}
+                "tf": tfs_small, "overall": ov_small, "journal": pub["stats"],
+                "poi_history": {"new": poi_new,
+                                "zones": sum(len(v.get(k, [])) for v in (poi_pub.get("tf") or {}).values()
+                                             for k in ("fvg", "ob", "fvg_mit", "ob_mit"))},
+                "intel": intel, **extra}
         if config.SIGNALS_ON:
             self.alerts(sym, pair, new_setups, new_entries, jr.closed_now)
             self.zone_alerts(sym, pair, tfs)
@@ -344,7 +346,7 @@ class Engine:
                     big = rec["type"] == "CONFLUENCE" or (rec["type"] == "HTF_POI" and rec.get("stage") in ("CHOCH", "CONFIRMED"))
                     if big and config.ALERT_WITH_CHART:
                         photo = os.path.join(self.store, "charts", f"{sym}_{config.MONITOR_TF}.png")
-                    prio = {"CONFLUENCE": 3, "OB_FVG_OVERLAP": 2, "HTF_FIB": 2}.get(rec["type"], 1)
+                    prio = {"CONFLUENCE": 3, "OB_FVG_OVERLAP": 2}.get(rec["type"], 1)
                     if rec["type"] == "HTF_POI":     # v20
                         prio = {"POI": 2, "CHOCH": 3, "CONFIRMED": 3}.get(rec.get("stage"), 1)
                     self.notify(monitor.message(sym, rec, d, price), photo, prio=prio, key=rec["id"], sym=sym)
@@ -359,7 +361,7 @@ class Engine:
                 q["signal"], q["setup"] = "MONITOR", None
         return pair
 
-    def render_png(self, sym, tf, store_bars, a, series, d, market, fib_primary=None):
+    def render_png(self, sym, tf, store_bars, a, series, d, market):
         if not RENDER or not store_bars:
             return
         last_closed = a.get("last_closed_t") or 0
@@ -371,8 +373,7 @@ class Engine:
         bars = [rnd(b, d) | ({"forming": True} if b["t"] + TF_SEC[tf] > self.now else {}) for b in store_bars[-150:]]
         t0 = bars[0]["t"]
         keep = lambda z: (z.get("end_t") or z.get("t", 0)) >= t0      # noqa: E731
-        an = dict(a, series=series, fib_primary=fib_primary,
-                  fib_local=a.get("fib") if tf != config.FIB_PRIMARY_TF else None)
+        an = dict(a, series=series)
         for k in ("events", "sweeps", "fvg", "ob", "fvg_mit", "ob_mit", "liquidity", "zones"):
             an[k] = [z for z in a.get(k, []) if keep(z)][-40:]
         if not config.SIGNALS_ON:       # v19: PNG minimalis untuk notif monitoring (tanpa BUY/SELL)
@@ -652,10 +653,10 @@ class Engine:
         pairs = {}
         self.timing = {}
         if self.p.get("mode_announced") != config.SIGNAL_MODE and self.p.get("init"):
-            self.notify("🛠 <b>Engine v19 aktif</b>\n" + (
+            self.notify("🛠 <b>Engine v22 aktif</b>\n" + (
                 "Mode: <b>MONITORING</b> – sinyal BUY/SELL dinonaktifkan sementara.\n"
                 f"Notifikasi kejadian {config.MONITOR_TF} ({', '.join(config.MONITOR_SYMBOLS)}): "
-                f"{', '.join(config.MONITOR_NOTIFY)}.\nAuto Fibonacci: {config.FIB_PRIMARY_TF} utama + Fib lokal per TF."
+                f"{', '.join(config.MONITOR_NOTIFY)}."
                 if not config.SIGNALS_ON else "Mode: <b>SIGNAL</b> – sinyal BUY/SELL aktif."), prio=5)
         self.p["mode_announced"] = config.SIGNAL_MODE
         # FOREX (XAUUSD) – jadwal berbasis kuota
@@ -740,7 +741,6 @@ class Engine:
             "run": {"trigger": trig, "duration_sec": dur, "gap_min": gap_now, "recent_gaps_min": gaps,
                     "by_trigger": by_trig, "timing": self.timing,
                     "avg_gap_min": round(sum(gaps) / len(gaps), 1) if gaps else None},
-            "fib": {"primary_tf": config.FIB_PRIMARY_TF, "levels": [0, 23.6, 38.2, 50, 61.8, 78.6, 100]},
             "monitor": {"tf": config.MONITOR_TF, "symbols": config.MONITOR_SYMBOLS, "notify": config.MONITOR_NOTIFY,
                         "confluence_min": config.MONITOR_CONFLUENCE_MIN,
                         "htf_poi": {"enabled": config.HTF_POI_ENABLED, "tf": config.HTF_POI_TF,
