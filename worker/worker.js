@@ -89,8 +89,8 @@ async function setup(env, host) {
   const commands = [
     { command: "status", description: "Cek sistem hidup" },
     { command: "price", description: "Harga terakhir" },
-    { command: "signal", description: "Ringkasan monitoring FVG/OB" },
-    { command: "events", description: "Kejadian/setup terakhir (monitoring)" },
+    { command: "signal", description: "Sinyal BUY/SELL final" },
+    { command: "events", description: "Riwayat FVG/OB valid" },
   ];
   for (const s of st.symbols || []) {
     commands.push({ command: s.toLowerCase(), description: `Analisis ${s}` });
