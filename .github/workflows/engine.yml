@@ -63,13 +63,14 @@ jobs:
           ALERT_WITH_CHART: ${{ vars.ALERT_WITH_CHART }}
           LARGE_TRADE_USD: ${{ vars.LARGE_TRADE_USD }}
           SKIP_WEEKEND: ${{ vars.SKIP_WEEKEND }}
-          # mode monitoring (kosong = default di config.py)
-          SIGNAL_MODE: ${{ vars.SIGNAL_MODE }}
+          # Final rules: BUY/SELL aktif. Override ke monitor hanya untuk emergency/manual pause.
+          SIGNAL_MODE: ${{ vars.SIGNAL_MODE || 'signal' }}
           INTEL_ENABLED: ${{ vars.INTEL_ENABLED || 'true' }}
           INTEL_MODE: ${{ vars.INTEL_MODE || 'live' }}
-          MONITOR_SYMBOLS: ${{ vars.MONITOR_SYMBOLS }}
-          MONITOR_TF: ${{ vars.MONITOR_TF }}
-          MONITOR_NOTIFY: ${{ vars.MONITOR_NOTIFY }}
+          # MONITOR_SYMBOLS sengaja tidak dioverride: config otomatis mengikuti FOREX_SYMBOLS + CRYPTO_SYMBOLS.
+          MONITOR_TF: M15
+          # Anti-spam: hanya pembentukan FVG/OB canonical yang tervalidasi.
+          MONITOR_NOTIFY: FVG_NEW,OB_NEW
           MONITOR_CONFLUENCE_MIN: ${{ vars.MONITOR_CONFLUENCE_MIN }}
         run: |
           mkdir -p store/candles store/journal store/poi store/private_state _site
@@ -80,7 +81,7 @@ jobs:
       - name: Cek hasil build dashboard
         run: |
           test -f _site/data/state.json || { echo "::error::state.json tidak dibuat engine"; exit 1; }
-          grep -q 'v22-poi-audit' _site/app.js || { echo "::error::app.js bukan versi v22 POI audit"; exit 1; }
+          grep -q 'v23-final-rules' _site/app.js || { echo "::error::app.js bukan versi v23 final rules"; exit 1; }
           test -f _site/app.js || { echo "::error::app.js tidak ditemukan"; exit 1; }
           test -f _site/index.html || { echo "::error::index.html tidak ditemukan"; exit 1; }
           grep -q 'v10-lazy' _site/app.js || { echo "::error::SMC v2 compatibility build belum terpasang"; exit 1; }
