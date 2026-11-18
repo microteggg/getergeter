@@ -89,7 +89,7 @@ async function setup(env, host) {
   const commands = [
     { command: "status", description: "Cek sistem hidup" },
     { command: "price", description: "Harga terakhir" },
-    { command: "signal", description: "Ringkasan monitoring + Auto Fibonacci" },
+    { command: "signal", description: "Ringkasan monitoring FVG/OB" },
     { command: "events", description: "Kejadian/setup terakhir (monitoring)" },
   ];
   for (const s of st.symbols || []) {
