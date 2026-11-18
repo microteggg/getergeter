@@ -43,8 +43,8 @@ def mark(ok):
 def help_text(st):
     lines = ["🤖 <b>Daftar command</b>", "",
              "/status – cek sistem & kuota", "/price – harga terakhir",
-             "/signal – " + ("sinyal" if config.SIGNALS_ON else "ringkasan monitoring FVG/OB"),
-             "/events – kejadian/setup terakhir (mode monitoring)",
+             "/signal – sinyal BUY/SELL final",
+             "/events – riwayat FVG/OB valid dan kejadian pasar",
              "/lastupdate – data terakhir yang diambil", "/riwayat – statistik riwayat entry (backtest)", ""]
     for s in st["pairs"]:
         lines.append(f"/{s.lower()} – analisis {s}" + (" + order flow" if st["pairs"][s]["market"] == "crypto" else ""))
@@ -77,7 +77,7 @@ def status_text(st):
     if tg:
         lines.append(f"Run terakhir: {tg.get('sent', 0)} terkirim · {tg.get('failed', 0)} gagal")
         if tg.get("notify_types"):
-            lines.append(f"Mode MONITORING · notif: {', '.join(tg['notify_types'])}")
+            lines.append(f"Notif otomatis anti-spam: BUY/SELL + {', '.join(tg['notify_types'])}")
         elif tg.get("zone_tfs"):
             lines.append(f"Notif zona: TF {', '.join(tg.get('zone_tfs') or [])} · tahap {', '.join(tg.get('zone_stages') or [])}")
     run = st.get("run") or {}

@@ -77,7 +77,7 @@ LARGE_TRADE_USD = float(_get("LARGE_TRADE_USD", "0"))
 STORE_LIMIT = {"M1": 4400, "M5": 6000, "M15": 4000, "H1": 4000, "H4": 3000, "D": 2000, "W": 1000}
 CHART_BARS = dict(STORE_LIMIT)
 JOURNAL_SETUP_LIMIT = int(_get("JOURNAL_SETUP_LIMIT", "3000"))   # per TF; entry tidak dibatasi
-ENGINE_VERSION = "v22-poi-audit"
+ENGINE_VERSION = "v23-final-rules"
 
 # ---------- Strategi top-down ----------
 BIAS_TF = _get("BIAS_TF", "H4")
@@ -140,8 +140,24 @@ POI_HISTORY_LIMIT = int(_get("POI_HISTORY_LIMIT", "20000"))  # zona selesai per 
 
 POI_PROXIMITY_ATR = float(_get("POI_PROXIMITY_ATR", "0.15"))
 SL_BUFFER_ATR = float(_get("SL_BUFFER_ATR", "0.10"))
-MIN_TARGET_RR = float(_get("MIN_TARGET_RR", "1.50"))
-TP1_R = float(_get("TP1_R", "1.0"))                     # TP1 = entry ± TP1_R × risk; TP2 = liquidity
+MIN_TARGET_RR = float(_get("MIN_TARGET_RR", "2.00"))
+MAX_TARGET_RR = float(_get("MAX_TARGET_RR", "3.00"))
+TP1_R = float(_get("TP1_R", "1.0"))
+RETEST_MAX_BARS_M15 = int(_get("RETEST_MAX_BARS_M15", "8"))
+RETEST_LEVEL_BUFFER_ATR = float(_get("RETEST_LEVEL_BUFFER_ATR", "0.10"))
+SETUP_CONTEXT_MAX_BARS_M15 = int(_get("SETUP_CONTEXT_MAX_BARS_M15", "32"))
+
+# ---------- Risk & management final ----------
+RISK_PER_TRADE_PCT = float(_get("RISK_PER_TRADE_PCT", "0.50"))
+BEST_SETUP_RISK_PCT = min(1.0, float(_get("BEST_SETUP_RISK_PCT", "1.00")))
+BEST_SETUP_MIN_RR = float(_get("BEST_SETUP_MIN_RR", "2.50"))
+MAX_DAILY_LOSS_PCT = float(_get("MAX_DAILY_LOSS_PCT", "3.00"))
+MAX_CONSECUTIVE_LOSSES = int(_get("MAX_CONSECUTIVE_LOSSES", "3"))
+RISK_DAY_TZ_OFFSET = int(_get("RISK_DAY_TZ_OFFSET", "7"))
+TP1_CLOSE_PCT = float(_get("TP1_CLOSE_PCT", "0.40"))
+OPPOSITE_DISPLACEMENT_CLOSE_PCT = float(_get("OPPOSITE_DISPLACEMENT_CLOSE_PCT", "0.30"))
+BE_TRIGGER_R = float(_get("BE_TRIGGER_R", "1.50"))
+PROTECTED_SWING_PIVOT_LEN = int(_get("PROTECTED_SWING_PIVOT_LEN", "2"))
 
 # ---------- Zone engine v18: BUY AREA / SELL AREA (definisi di zones.py) ----------
 ZONE_ENABLED = _bool("ZONE_ENABLED", True)
@@ -162,11 +178,9 @@ ZONE_ALERT_TFS = _list("ZONE_ALERT_TFS", "M15,H1,H4")
 ZONE_ALERT_STAGES = _list("ZONE_ALERT_STAGES", "AREA,SETUP,CONFIRMED")   # tambah INVALID bila perlu
 
 # ---------- v19: MODE ----------
-# monitor (default) : BUY/SELL, entry, hasil entry, dan notif zona BUY/SELL TIDAK dikirim & tidak ditampilkan.
-#                     Engine hanya mencatat + mengirim KEJADIAN/SETUP (monitor.py) untuk dicek manual.
-#                     Journal/backtest lama tetap dihitung & disimpan (tidak dihapus).
-# signal            : perilaku lama v18 (sinyal BUY/SELL aktif kembali).
-SIGNAL_MODE = _get("SIGNAL_MODE", "monitor").lower()
+# signal adalah default final: BUY/SELL aktif dengan filter final v23.
+# monitor tetap tersedia hanya sebagai fallback manual.
+SIGNAL_MODE = _get("SIGNAL_MODE", "signal").lower()
 if SIGNAL_MODE not in ("monitor", "signal"):
     SIGNAL_MODE = "monitor"
 SIGNALS_ON = SIGNAL_MODE == "signal"
@@ -178,17 +192,15 @@ INTEL_REGIME_LOOKBACK = int(_get("INTEL_REGIME_LOOKBACK", "100"))
 INTEL_MIN_COVERAGE = float(_get("INTEL_MIN_COVERAGE", "0.90"))
 
 # ---------- v19: Monitoring kejadian/setup (monitor.py) ----------
-MONITOR_SYMBOLS = _list("MONITOR_SYMBOLS", "XAUUSD")         # pair yang dicatat & dinotifkan
+MONITOR_SYMBOLS = _list("MONITOR_SYMBOLS", ",".join(FOREX_SYMBOLS + CRYPTO_SYMBOLS))
 MONITOR_TF = _get("MONITOR_TF", "M15").upper()
 MONITOR_LOOKBACK = int(_get("MONITOR_LOOKBACK", "300"))      # candle MONITOR_TF yang dipindai tiap run
 MONITOR_LIMIT = int(_get("MONITOR_LIMIT", "5000"))           # riwayat kejadian disimpan per pair
 MONITOR_SWEEP_WINDOW = int(_get("MONITOR_SWEEP_WINDOW", "12"))   # sweep dihitung confluence bila <= N candle
 MONITOR_CONFLUENCE_MIN = int(_get("MONITOR_CONFLUENCE_MIN", "4"))  # skor minimum (maks 6)
 MONITOR_INTERNAL_STRUCTURE = _bool("MONITOR_INTERNAL_STRUCTURE", False)  # iBOS/iCHoCH ikut dicatat
-# Tipe kejadian yang dikirim ke Telegram (lainnya hanya dicatat di dashboard):
-#   STRUCTURE, SWEEP, FVG_NEW, OB_NEW, OB_FVG_OVERLAP, CONFLUENCE
-#   HTF_POI (v20)
-MONITOR_NOTIFY = _list("MONITOR_NOTIFY", "STRUCTURE,SWEEP,OB_FVG_OVERLAP,CONFLUENCE,HTF_POI")
+# Anti-spam final: otomatis hanya FVG/OB canonical yang tervalidasi sequence.
+MONITOR_NOTIFY = [x for x in _list("MONITOR_NOTIFY", "FVG_NEW,OB_NEW") if x in ("FVG_NEW", "OB_NEW")]
 
 # ---------- v20: HTF POI -> CHoCH LTF (monitor.py) ----------
 # Harga MONITOR_TF masuk FVG/OB HTF_POI_TF -> CHoCH/iCHoCH searah -> BOS/iBOS lanjutan.

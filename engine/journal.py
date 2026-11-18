@@ -1,4 +1,4 @@
-"""Jurnal sinyal permanen (untuk cek ulang & backtest) – v14.
+"""Jurnal sinyal permanen – v23 final rules.
 
 store/journal/{SYM}.json
   setups : setiap SETUP per TF (pertama kali valid) + hasilnya
@@ -9,84 +9,27 @@ Aturan:
 - src = "live"   : tercatat saat engine berjalan
   src = "replay" : direkonstruksi dari data historis (logika sama).
 
-Hasil dihitung dengan DUA mode manajemen posisi (ov = 2):
-  FULL : seluruh posisi ke TP2 atau SL (−1R). TP1 hanya penanda.
-  PM   : 50% ditutup di TP1, sisa SL dipindah ke entry (break-even), sisa ke TP2.
-         Hasil = 0.5×R(TP1) + 0.5×(R(TP2) atau 0).  Status: TP2 / BE / SL / OPEN.
-Candle ambigu (SL dan TP tersentuh di candle yang sama, urutan tidak diketahui) → dihitung yang terburuk
-dan ditandai ambig = True. MFE/MAE dihitung sampai posisi FULL keluar dan konsisten dengan status.
+Hasil memakai management final (ov = 3): TP1 1R menutup 40%, runner 60% ke 2R–3R; BE hanya setelah MFE 1,5R atau protected swing; partial exit hanya pada displacement lawan; full exit jika protected swing patah oleh candle close.
 """
 import json
 import os
 
 import config
 from resample import TF_SEC
+from trading_rules import managed_outcome
 
-OUTCOME_VERSION = 2
+OUTCOME_VERSION = 3
 
 
 def outcome(rec, bars):
-    """bars = candle (urut waktu) yang DIBUKA pada/sesudah waktu keputusan (close_t)."""
-    bull = rec["dir"] == "bull"
-    entry, sl, tp1, tp2 = rec["entry"], rec["sl"], rec["tp1"], rec["tp2"]
-    risk = abs(entry - sl) or 1e-12
-    r1, r2 = abs(tp1 - entry) / risk, abs(tp2 - entry) / risk
-    o = {"status": "OPEN", "result_r": None, "exit_t": None,
-         "status_pm": "OPEN", "result_pm_r": None, "exit_t_pm": None,
-         "tp1_hit": False, "tp1_t": None, "ambig": False, "mfe_r": 0.0, "mae_r": 0.0, "ov": OUTCOME_VERSION}
-    full_done = pm_done = False
-    mfe = mae = 0.0
-    for b in bars:
-        fav = ((b["h"] - entry) if bull else (entry - b["l"])) / risk
-        adv = ((entry - b["l"]) if bull else (b["h"] - entry)) / risk
-        hit_sl = b["l"] <= sl if bull else b["h"] >= sl
-        hit_t1 = b["h"] >= tp1 if bull else b["l"] <= tp1
-        hit_t2 = b["h"] >= tp2 if bull else b["l"] <= tp2
-        hit_be = b["l"] <= entry if bull else b["h"] >= entry
-
-        if not o["tp1_hit"]:
-            if hit_sl:                       # SL sebelum TP1 (bila TP1 juga kena di candle ini → ambigu, dihitung SL)
-                o["ambig"] = hit_t1
-                mae = max(mae, 1.0)
-                o.update(status="SL", result_r=-1.0, exit_t=b["t"], status_pm="SL", result_pm_r=-1.0, exit_t_pm=b["t"])
-                full_done = pm_done = True
-                break
-            mfe, mae = max(mfe, fav), max(mae, adv)
-            if hit_t1:
-                o.update(tp1_hit=True, tp1_t=b["t"])
-                if hit_t2:
-                    mfe = max(mfe, r2)
-                    o.update(status="TP2", result_r=round(r2, 2), exit_t=b["t"],
-                             status_pm="TP2", result_pm_r=round(0.5 * r1 + 0.5 * r2, 2), exit_t_pm=b["t"])
-                    full_done = pm_done = True
-                    break
-            continue
-
-        # ---- setelah TP1 tersentuh ----
-        if not full_done:
-            if hit_sl:
-                o["ambig"] = o["ambig"] or hit_t2
-                mae = max(mae, 1.0)
-                o.update(status="SL", result_r=-1.0, exit_t=b["t"])
-                full_done = True
-            elif hit_t2:
-                mfe = max(mfe, r2)
-                o.update(status="TP2", result_r=round(r2, 2), exit_t=b["t"])
-                full_done = True
-            else:
-                mfe, mae = max(mfe, fav), max(mae, adv)
-        if not pm_done:
-            if hit_be:                       # BE & TP2 di candle yang sama → dihitung BE (konservatif)
-                o["ambig"] = o["ambig"] or hit_t2
-                o.update(status_pm="BE", result_pm_r=round(0.5 * r1, 2), exit_t_pm=b["t"])
-                pm_done = True
-            elif hit_t2:
-                o.update(status_pm="TP2", result_pm_r=round(0.5 * r1 + 0.5 * r2, 2), exit_t_pm=b["t"])
-                pm_done = True
-        if full_done and pm_done:
-            break
-    o["mfe_r"], o["mae_r"] = round(mfe, 2), round(mae, 2)
-    return o
+    return managed_outcome(
+        rec, bars, tp1_close_pct=config.TP1_CLOSE_PCT,
+        opposite_close_pct=config.OPPOSITE_DISPLACEMENT_CLOSE_PCT,
+        be_trigger_r=config.BE_TRIGGER_R,
+        protected_pivot_len=config.PROTECTED_SWING_PIVOT_LEN,
+        atr_len=config.ATR_LEN, sl_buffer_atr=config.SL_BUFFER_ATR,
+        displacement_atr=config.DISPLACEMENT_ATR,
+        displacement_body_ratio=config.DISPLACEMENT_BODY_RATIO)
 
 
 class Journal:
@@ -100,7 +43,7 @@ class Journal:
             data = {}
         self.setups = data.get("setups", {})
         self.entries = data.get("entries", {})
-        self.closed_now = []          # entry yang baru selesai (FULL: TP2/SL) pada run ini
+        self.closed_now = []          # entry yang baru selesai (management final) pada run ini
 
     def merge(self, kind, recs, now):
         """Tambahkan record baru. Return list record baru."""
@@ -123,7 +66,7 @@ class Journal:
 
     def update_outcomes(self, bars_by_tf, entry_tfs):
         """bars_by_tf: {tf: candle tertutup}. entry_tfs: urutan TF (halus→kasar) untuk menilai entry.
-        Record lama (ov < 2) dihitung ulang sekali bila candle-nya masih tersimpan."""
+        Record lama (ov < 3) dihitung ulang sekali bila candle-nya masih tersimpan."""
         def pick(tfs, t):
             for tf in tfs:
                 bars = bars_by_tf.get(tf) or []
@@ -190,7 +133,7 @@ def _stats(rows, status_key, result_key):
 
 
 def stats(rows):
-    """Kunci level atas = mode FULL (kompatibel v13); 'pm' = mode TP1 50% + break-even."""
+    """Kunci level atas dipertahankan untuk kompatibilitas; 'pm' sekarang berisi management final v23."""
     out = _stats(rows, "status", "result_r")
     out["pm"] = _stats(rows, "status_pm", "result_pm_r")
     return out

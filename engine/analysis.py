@@ -15,6 +15,7 @@ import config
 from indicators import ma, rsi, atr
 from resample import TF_SEC
 from smc import model, premium_discount_at
+from trading_rules import contextual_entry_zone, retest_confirmation
 from zones import build_zones
 
 _DROP = ("created", "index", "pivot_index", "last_index", "tol", "event_id", "hist", "start", "end_i")
@@ -98,25 +99,26 @@ class _Scanner:
         self.n = n
         self.k = smc["swing_len"]
         self.pools = smc["liquidity"] + smc["liquidity_done"]
-        # kandidat (sequence, zona) beserta rentang bar di mana keduanya valid & zona sudah di-retrace
+        # Kandidat wajib memiliki OB canonical. FVG hanya dipakai bila berpasangan/overlap;
+        # FVG tidak pernah menjadi konteks entry tunggal.
         self.best = {}
         for order, s in enumerate(smc["sequences"]):
             inv = s["invalid_i"] if s["invalid_i"] is not None else n
-            for prio, z in ((0, s["fvg"]), (1, s["ob"])):          # FVG diprioritaskan, lalu OB
-                if not z:
-                    continue
-                ri = _retrace_index(z, bars)
-                if ri is None:
-                    continue
-                zend = z["end_i"] if z.get("end_i") is not None else n
-                start, end = max(s["event"]["index"], ri), min(inv, zend)
-                key = (order, -prio)
-                for j in range(start, end):
-                    c, a = bars[j]["c"], atr14[j] * config.POI_PROXIMITY_ATR
-                    if z["bottom"] - a <= c <= z["top"] + a:
-                        cur = self.best.get(j)
-                        if cur is None or key > cur[0]:
-                            self.best[j] = (key, s, z, ri)
+            z = contextual_entry_zone(s)
+            if not z:
+                continue
+            ri = _retrace_index(z, bars)
+            if ri is None:
+                continue
+            zend = z["end_i"] if z.get("end_i") is not None else n
+            start, end = max(s["event"]["index"], ri), min(inv, zend)
+            key = (order, int(z.get("paired_fvg", False)))
+            for j in range(start, end):
+                c, a = bars[j]["c"], atr14[j] * config.POI_PROXIMITY_ATR
+                if z["bottom"] - a <= c <= z["top"] + a:
+                    cur = self.best.get(j)
+                    if cur is None or key > cur[0]:
+                        self.best[j] = (key, s, z, ri)
 
     def _range_at(self, j):
         hs, ls, k = self.smc["s_highs"], self.smc["s_lows"], self.k
@@ -184,11 +186,12 @@ class _Scanner:
                               "price": _r(extreme, d), "t": seq["sweep"]["t"]},
                     "target": {"side": tgt[2]["side"], "label": lab, "level": _r(tp2, d)},
                     "zone": {"id": zone["id"], "kind": zone["kind"], "scope": zone.get("scope"),
-                             "top": _r(zone["top"], d), "bottom": _r(zone["bottom"], d), "t": zone["t"]},
+                             "top": _r(zone["top"], d), "bottom": _r(zone["bottom"], d), "t": zone["t"],
+                             "paired_fvg": bool(zone.get("paired_fvg")), "fvg_id": zone.get("fvg_id")},
                 }
         checklist = [
             [bool(seq), "Sweep liquidity → displacement → BOS/MSS (sequence belum invalid)"],
-            [bool(zone), "Harga kembali ke FVG/OB kontekstual setelah sempat meninggalkannya"],
+            [bool(zone), "Harga kembali ke OB canonical (FVG hanya bila berpasangan/overlap)"],
             [bool(loc_ok), f"Lokasi {loc or '-'} sesuai arah (bull = discount, bear = premium)"],
             [bool(tgt), "Liquidity lawan (BSL/SSL aktif) tersedia sebagai target"],
             [rr is not None and rr >= config.MIN_TARGET_RR,
@@ -285,13 +288,13 @@ class _Decider:
         self.b_ev = ([e["t"] + sb for e in bsw], [e["dir"] for e in bsw])
         self.s_times = self.s.get("_times", [])
         self.s_close = [t + ss for t in self.s_times]
-        self.on = {t: sid for t, sid in self.s.get("_on", [])}
         self.setups = self.s.get("_setups", {})
+        self.setup_rows = sorted(self.setups.values(), key=lambda x: x["close_t"])
+        self.setup_close = [x["close_t"] for x in self.setup_rows]
         self.c_times, self.c_closes = self.c.get("_times", []), self.c.get("_closes", [])
-        cin = [e for e in self.c.get("events", []) if e["scope"] == "internal"]
-        self.c_in = ([e["t"] + sc for e in cin], [e["dir"] for e in cin])
+        self.c_bars = self.c.get("_bars", [])
+        self.c_atr = self.c.get("_atr14", [])
         self.c_all = self.c.get("events", [])
-        self.c_all_close = [e["t"] + sc for e in self.c_all]
 
     @staticmethod
     def _last(ev, T):
@@ -301,49 +304,60 @@ class _Decider:
     def at(self, k):
         """Keputusan pada close candle CONFIRM_TF ke-k. Return (entry|None, reasons, setup)."""
         T = self.c_times[k] + self.sc
-        h = bisect_right(self.s_close, T) - 1
-        sid = self.on.get(self.s_times[h]) if h >= 0 else None
-        setup = self.setups.get(sid) if sid else None
+        h = bisect_right(self.setup_close, T) - 1
+        setup = self.setup_rows[h] if h >= 0 else None
+        max_age = config.SETUP_CONTEXT_MAX_BARS_M15 * TF_SEC[config.CONFIRM_TF]
+        if setup and T - setup["close_t"] > max_age:
+            setup = None
         want = setup["dir"] if setup else None
         nb = bisect_right(self.b_close, T)
         bias = self._last(self.b_ev, T) if nb >= self.need_b else None
         bias_txt = bias or ("data belum cukup" if nb < self.need_b else "netral")
-        idir = self._last(self.c_in, T) if k + 1 >= self.need_c else None
-        trig = None
-        if want and idir == want:
-            i = bisect_right(self.c_all_close, T) - 1
-            while i >= 0:
-                e = self.c_all[i]
-                if e["dir"] == want:
-                    if e["t"] >= setup["touch_t"]:
-                        trig = e
-                    break
-                i -= 1
+        conf = None
+        if want and k + 1 >= self.need_c:
+            conf = retest_confirmation(
+                self.c_bars, self.c_all, k, want, setup["touch_t"], self.c_atr,
+                config.RETEST_MAX_BARS_M15, config.RETEST_LEVEL_BUFFER_ATR)
+        trig = conf["event"] if conf else None
         reasons = [
             [bias == want if want else bias is not None, f"Bias {config.BIAS_TF}: swing structure {bias_txt}"],
-            [want is not None, f"Setup {config.SETUP_TF}: " + (f"{setup['signal']} – {setup['model']}" if setup else "belum ada setup valid")],
+            [want is not None, f"Liquidity + POI {config.SETUP_TF}: " +
+             (f"{setup['signal']} – {setup['model']} – {setup['zone']['kind']}" if setup else "belum ada setup valid")],
             [trig is not None,
-             f"Trigger {config.CONFIRM_TF}: {trig['label']} {trig['dir']} @ {trig['level']}" if trig
-             else f"Trigger {config.CONFIRM_TF}: belum ada BOS/CHoCH searah setelah harga menyentuh POI"],
+             (f"Struktur {config.CONFIRM_TF}: {trig['label']} close-confirmed @ {trig['level']} → "
+              f"retest + konfirmasi dalam {conf['bars_after_break']}/{config.RETEST_MAX_BARS_M15} candle") if trig
+             else (f"Struktur/retest {config.CONFIRM_TF}: tunggu BOS/MSS close-confirmed, lalu retest + "
+                   f"candle konfirmasi ≤ {config.RETEST_MAX_BARS_M15} candle")],
         ]
         entry = None
         if want and bias == want and trig:
             bull = want == "bull"
             price = self.c_closes[k]
-            sl, tp2 = setup["sl"], setup["tp2"]
+            a = self.c_atr[k]
+            sl = conf["invalid_level"] - config.SL_BUFFER_ATR * a if bull else conf["invalid_level"] + config.SL_BUFFER_ATR * a
+            liquidity_target = setup["tp2"]
             risk = abs(price - sl)
-            rr = abs(tp2 - price) / risk if risk else 0
-            ok = risk > 0 and ((bull and sl < price < tp2) or (not bull and tp2 < price < sl)) and rr >= config.MIN_TARGET_RR
-            reasons.append([ok, f"RR pada harga trigger {rr:.2f} ≥ {config.MIN_TARGET_RR}"])
+            liquidity_rr = abs(liquidity_target - price) / risk if risk else 0
+            ok = risk > 0 and ((bull and sl < price < liquidity_target) or (not bull and liquidity_target < price < sl)) and liquidity_rr >= config.MIN_TARGET_RR
+            reasons.append([ok, f"RR ke liquidity {liquidity_rr:.2f} ≥ {config.MIN_TARGET_RR}"])
             if ok:
                 tp1 = price + (1 if bull else -1) * config.TP1_R * risk
-                if (bull and tp1 >= tp2) or (not bull and tp1 <= tp2):
-                    tp1 = price + (tp2 - price) * 0.5
+                capped_rr = min(config.MAX_TARGET_RR, liquidity_rr)
+                tp2 = price + (1 if bull else -1) * capped_rr * risk
                 d = self.d
                 entry = dict(setup, id=setup["seq_id"], setup_id=setup["id"], setup_t=setup["t"],
                              t=self.c_times[k], close_t=T, tf=config.CONFIRM_TF,
                              entry=round(price, d), tp1=round(tp1, d), risk=round(risk, d),
-                             rr=round(rr, 2), trigger={"t": trig["t"], "label": trig["label"], "level": trig["level"]})
+                              sl=round(sl, d), tp2=round(tp2, d), rr=round(capped_rr, 2),
+                              liquidity_rr=round(liquidity_rr, 2), htf_aligned=True, retest_confirmed=True,
+                              management={"tp1_close_pct": config.TP1_CLOSE_PCT * 100,
+                                          "runner_pct": (1 - config.TP1_CLOSE_PCT) * 100,
+                                          "be_trigger_r": config.BE_TRIGGER_R,
+                                          "tp2_r": round(capped_rr, 2)},
+                              trigger={"t": trig["t"], "label": trig["label"], "level": trig["level"],
+                                       "retest_t": self.c_bars[conf["retest_index"]]["t"],
+                                       "confirm_t": self.c_times[k],
+                                       "bars_after_break": conf["bars_after_break"]})
         return entry, reasons, setup
 
 
@@ -353,7 +367,7 @@ def overall(tfs, digits=2):
     n = len(dc.c_times)
     entries, seen = [], set()
     for k in range(n):
-        if not dc.on:
+        if not dc.setup_rows:
             break
         e, _, _ = dc.at(k)
         if e and e["id"] not in seen:

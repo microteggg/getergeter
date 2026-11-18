@@ -1,4 +1,4 @@
-"""Engine utama (GitHub Actions cron tiap 5 menit) – v22 POI audit.
+"""Engine utama – v23 final rules (BUY/SELL aktif, POI audit tetap dipertahankan).
 v22 POI audit: FVG/OB canonical + persistent lifecycle history.
 v21: Phase 1 Market Intelligence live, non-blocking.
 v19: MODE MONITOR (BUY/SELL dinonaktifkan sementara; engine mengirim kejadian/setup untuk dicek manual),
@@ -38,6 +38,7 @@ from orderflow import book_metrics, flow_summary, trade_metrics
 from poi_journal import PoiJournal
 from resample import TF_SEC, closed_only, resample, upsert
 from telegram_notify import send_message, send_photo
+from trading_rules import account_risk_snapshot, position_risk_pct
 
 RENDER = os.getenv("RENDER_CHARTS", "true").lower() != "false"
 STATE_TAIL = 10          # state.json hanya ringkasan; riwayat lengkap ada di chart_*.json & journal_*.json
@@ -111,18 +112,19 @@ class Engine:
         self.p["sent"] = self.p["sent"][-6000:]
 
     def notify(self, text, photo=None, prio=0, key=None, sym=None):
+        allowed = ("<b>ENTRY SIGNAL</b>" in text or
+                   "<b>MONITOR · FVG baru</b>" in text or
+                   "<b>MONITOR · Order Block baru</b>" in text)
+        if not allowed:
+            return
         self.outbox.append({"prio": prio, "text": text, "photo": photo, "key": key, "sym": sym,
                             "created": self.now, "attempts": 0})
 
     def fail(self, sym, err):
         self.errors[sym] = err
         self.p["fail"][sym] = self.p["fail"].get(sym, 0) + 1
-        if self.p["fail"][sym] == 3:
-            self.notify(f"⚠️ <b>{sym}</b>: pengambilan data gagal 3x berturut-turut.\n{messages.escape(err)}")
 
     def recover(self, sym, src):
-        if self.p["fail"].get(sym, 0) >= 3:
-            self.notify(f"✅ <b>{sym}</b>: pengambilan data {src} pulih kembali.")
         self.p["fail"][sym] = 0
 
     # ---------- FOREX (XAUUSD) ----------
@@ -257,11 +259,38 @@ class Engine:
 
         # ----- jurnal permanen: setup semua TF + entry top-down, lalu nilai hasilnya -----
         jr = Journal(self.store, sym)
+        risk_state = account_risk_snapshot(
+            self.store, self.now, config.MAX_DAILY_LOSS_PCT, config.MAX_CONSECUTIVE_LOSSES,
+            config.RISK_DAY_TZ_OFFSET, config.RISK_PER_TRADE_PCT)
+        blocked = set()
+        filtered_entries = []
+        for e in ov.get("entries", []):
+            if e["id"] in jr.entries:
+                filtered_entries.append(e)
+                continue
+            live = e["close_t"] >= self.now - 2 * TF_SEC.get(e.get("tf"), 900)
+            risk_pct, best = position_risk_pct(
+                e, config.RISK_PER_TRADE_PCT, config.BEST_SETUP_RISK_PCT, config.BEST_SETUP_MIN_RR)
+            e.update(risk_pct=risk_pct, best_setup=best,
+                     risk_policy={"daily_loss_limit_pct": config.MAX_DAILY_LOSS_PCT,
+                                  "consecutive_loss_limit": config.MAX_CONSECUTIVE_LOSSES})
+            if live and not risk_state["allowed"]:
+                blocked.add(e["id"])
+                continue
+            filtered_entries.append(e)
+        ov["entries"] = filtered_entries
+        if ov.get("setup") and ov["setup"].get("id") in blocked:
+            ov.update(signal="WAIT", setup=None, pending=None,
+                      summary="WAIT – risk lock aktif: " + risk_state["reason"])
+            ov.setdefault("reasons", []).append([False, "Risk lock: " + risk_state["reason"]])
         new_setups = {tf: jr.merge("setups", tfs[tf].get("setups", []), self.now) for tf in tfs_list}
         new_entries = jr.merge("entries", ov.get("entries", []), self.now)
         entry_tfs = [tf for tf in ("M1", "M5", "M15", "H1") if tf in tfs_list]
         jr.update_outcomes(closed, entry_tfs)
         jr.save()
+        risk_state = account_risk_snapshot(
+            self.store, self.now, config.MAX_DAILY_LOSS_PCT, config.MAX_CONSECUTIVE_LOSSES,
+            config.RISK_DAY_TZ_OFFSET, config.RISK_PER_TRADE_PCT)
         pub = jr.public()
         pub.update(digits=d, market=market, updated_ts=self.now,
                    stats={"entries": stats(pub["entries"]),
@@ -327,10 +356,9 @@ class Engine:
                 "poi_history": {"new": poi_new,
                                 "zones": sum(len(v.get(k, [])) for v in (poi_pub.get("tf") or {}).values()
                                              for k in ("fvg", "ob", "fvg_mit", "ob_mit"))},
-                "intel": intel, **extra}
+                "intel": intel, "risk": risk_state, **extra}
         if config.SIGNALS_ON:
             self.alerts(sym, pair, new_setups, new_entries, jr.closed_now)
-            self.zone_alerts(sym, pair, tfs)
         elif not self.p["init"].get(sym):
             self.p["init"][sym] = self.now
         # ----- v19: monitoring kejadian/setup (observation mode) -----
@@ -397,44 +425,18 @@ class Engine:
         except Exception as e:      # noqa: BLE001 – chart gagal tidak boleh menghentikan engine
             self.warnings.append(f"Chart {sym} {tf} gagal dibuat: {e}")
 
-    # ---------- ALERT: 🟡 STRUCTURE -> 🟠 SETUP READY -> 🚨 ENTRY -> 🏁 HASIL ----------
+    # ---------- ALERT FINAL: hanya BUY/SELL terkonfirmasi (anti-spam) ----------
     def alerts(self, sym, pair, new_setups, new_entries, closed_now):
         first = not self.p["init"].get(sym)
-        for tf in config.ALERT_TFS:
-            an = pair["tf"].get(tf) or {}
-            if not an.get("enough"):
-                continue
-            recent = an.get("last_closed_t", 0) - 2 * TF_SEC[tf]
-            for e in an.get("events", []):
-                if e["t"] < recent or (e.get("scope") == "internal" and not config.ALERT_INTERNAL_STRUCTURE):
-                    continue
-                k = f"{sym}:EV:{tf}:{e['id']}"
-                if self.sent(k):
-                    continue
-                self.mark(k)
-                if not first:
-                    self.notify(self.msg_structure(sym, tf, e, pair), prio=1)
         if not first:
-            for s in new_setups.get(config.SETUP_TF, []):
-                if s["src"] == "live":
-                    self.notify(self.msg_setup(sym, s, pair), prio=2)
             for e in new_entries:
                 if e["src"] == "live":
                     photo = (os.path.join(self.store, "charts", f"{sym}_{config.SETUP_TF}.png")
                              if config.ALERT_WITH_CHART else None)
-                    self.notify(self.msg_entry(sym, e, pair), photo, prio=3)
-            for e in closed_now:
-                if e["src"] == "live":
-                    self.notify(self.msg_result(sym, e, pair), prio=2)
+                    self.notify(self.msg_entry(sym, e, pair), photo, prio=3,
+                                key=f"{sym}:ENTRY:{e['id']}:{e['close_t']}", sym=sym)
         else:
             self.p["init"][sym] = self.now
-            ov = pair["overall"]
-            js = pair["journal"]["entries"]
-            self.notify(f"🤖 <b>Alert Bot aktif – {sym}</b>\nHarga: {messages.f(pair['price'], pair['digits'])}\n"
-                        f"Strategi: {config.BIAS_TF} → {config.SETUP_TF} → {config.CONFIRM_TF}\n"
-                        f"Sinyal saat ini: {messages.ICON[ov['signal']]}\n"
-                        f"Riwayat (replay data tersimpan): {js['total']} entry · winrate {js['winrate'] if js['winrate'] is not None else '-'}%\n"
-                        f"Ketik /help untuk command.")
 
     # ---------- ALERT ZONA: 🔵/🟠 AREA -> ⚡ SETUP -> ✅ CONFIRMED (1x per kejadian) ----------
     def zone_alerts(self, sym, pair, tfs):
@@ -550,14 +552,17 @@ class Engine:
     def msg_entry(self, sym, s, pair):
         d, sig = pair["digits"], s["signal"]
         return (f"🚨 <b>ENTRY SIGNAL</b>\n<b>{sym}</b> – <b>{'🟢 BUY' if sig == 'BUY' else '🔴 SELL'}</b>\n"
-                f"⭐ Top-down terkonfirmasi ({config.BIAS_TF}→{config.SETUP_TF}→{config.CONFIRM_TF})\n\n"
-                f"Model: {messages.escape(s['model'])} • RR {s['rr']}\n"
+                f"⭐ HTF + liquidity + structure + retest + RR lolos ({config.BIAS_TF}→{config.SETUP_TF}→{config.CONFIRM_TF})\n\n"
+                f"Model: {messages.escape(s['model'])} • RR TP2 {s['rr']}\n"
                 f"Zona: {s['zone']['kind']} {messages.f(s['zone']['bottom'], d)}–{messages.f(s['zone']['top'], d)}\n"
                 f"Sweep: {s['sweep']['side']} @ {messages.f(s['sweep']['level'], d)}\n"
-                f"Trigger {config.CONFIRM_TF}: {s['trigger']['label']} @ {messages.f(s['trigger']['level'], d)}\n"
+                f"Trigger {config.CONFIRM_TF}: {s['trigger']['label']} close @ {messages.f(s['trigger']['level'], d)}\n"
+                f"Retest + candle konfirmasi: {s['trigger']['bars_after_break']}/{config.RETEST_MAX_BARS_M15} candle\n"
                 f"Target: {s['target']['label']} {messages.f(s['target']['level'], d)}\n\n"
                 f"🎯 Entry: {messages.f(s['entry'], d)}\n🛑 SL: {messages.f(s['sl'], d)}\n"
-                f"✅ TP1: {messages.f(s['tp1'], d)} ({config.TP1_R:g}R) | TP2: {messages.f(s['tp2'], d)}\n"
+                f"✅ TP1: {messages.f(s['tp1'], d)} (1R, tutup 40%) | TP2: {messages.f(s['tp2'], d)} ({s['rr']}R, runner 60%)\n"
+                f"Risk: <b>{s.get('risk_pct', config.RISK_PER_TRADE_PCT):g}%</b>"
+                f"{' (setup terbaik)' if s.get('best_setup') else ''} · BE baru ≥ {config.BE_TRIGGER_R:g}R/protected swing\n"
                 f"Candle: {messages.wib(s['close_t'], '%d/%m %H:%M')}\n\n🔥 STATUS: {sig} CONFIRMED")
 
     def msg_result(self, sym, e, pair):
@@ -578,7 +583,10 @@ class Engine:
         self.tg_sent = self.tg_fail = 0
         old = self.p.get("tg_queue") or []
         retry = [q for q in old if self.now - q.get("created", 0) <= config.TELEGRAM_RETRY_MAX_AGE_MIN * 60
-                 and q.get("attempts", 0) < config.TELEGRAM_RETRY]
+                 and q.get("attempts", 0) < config.TELEGRAM_RETRY and
+                 ("<b>ENTRY SIGNAL</b>" in q.get("text", "") or
+                  "<b>MONITOR · FVG baru</b>" in q.get("text", "") or
+                  "<b>MONITOR · Order Block baru</b>" in q.get("text", ""))]
         for q in old:
             if q not in retry:
                 self._tg_log(q, "FAILED", q.get("last_error") or "kedaluwarsa di antrean", [])
@@ -652,12 +660,6 @@ class Engine:
     def run(self):
         pairs = {}
         self.timing = {}
-        if self.p.get("mode_announced") != config.SIGNAL_MODE and self.p.get("init"):
-            self.notify("🛠 <b>Engine v22 aktif</b>\n" + (
-                "Mode: <b>MONITORING</b> – sinyal BUY/SELL dinonaktifkan sementara.\n"
-                f"Notifikasi kejadian {config.MONITOR_TF} ({', '.join(config.MONITOR_SYMBOLS)}): "
-                f"{', '.join(config.MONITOR_NOTIFY)}."
-                if not config.SIGNALS_ON else "Mode: <b>SIGNAL</b> – sinyal BUY/SELL aktif."), prio=5)
         self.p["mode_announced"] = config.SIGNAL_MODE
         # FOREX (XAUUSD) – jadwal berbasis kuota
         fx_closed = config.SKIP_WEEKEND and session.market_closed(self.now)
@@ -728,16 +730,15 @@ class Engine:
             self.warnings.append(f"Engine sempat tidak berjalan ±{gap_now:.0f} menit sebelum run ini "
                                  f"(trigger sekarang: {trig}). Cek scheduler / watchdog Cloudflare.")
         st = {
-            "version": 20, "mode": config.SIGNAL_MODE, "updated_ts": self.now, "telegram_ok": self.tg_ok,
+            "version": 23, "mode": config.SIGNAL_MODE, "updated_ts": self.now, "telegram_ok": self.tg_ok,
             "telegram": {"sent": getattr(self, "tg_sent", 0), "failed": getattr(self, "tg_fail", 0),
                          "configured": telegram_notify.configured(),
                          "pending_retry": len(self.p.get("tg_queue") or []),
                          "last_sent_ts": self.p.get("tg_last_ok_ts") or self.p.get("tg_last_sent_ts"),
                          "last_error": self.p.get("tg_last_err"), "last_error_ts": self.p.get("tg_last_err_ts"),
                          "log": self.p["tg_log"][-40:],
-                         "notify_types": config.MONITOR_NOTIFY if not config.SIGNALS_ON else None,
-                         "zone_tfs": config.ZONE_ALERT_TFS if config.SIGNALS_ON else [],
-                         "zone_stages": config.ZONE_ALERT_STAGES if config.SIGNALS_ON else []},
+                          "notify_types": ["BUY", "SELL"] + config.MONITOR_NOTIFY,
+                          "zone_tfs": [], "zone_stages": []},
             "run": {"trigger": trig, "duration_sec": dur, "gap_min": gap_now, "recent_gaps_min": gaps,
                     "by_trigger": by_trig, "timing": self.timing,
                     "avg_gap_min": round(sum(gaps) / len(gaps), 1) if gaps else None},
@@ -746,7 +747,14 @@ class Engine:
                         "htf_poi": {"enabled": config.HTF_POI_ENABLED, "tf": config.HTF_POI_TF,
                                     "kinds": config.HTF_POI_KINDS, "stages": config.HTF_POI_STAGES}},
             "errors": self.errors, "warnings": self.warnings,
-            "strategy": {"bias": config.BIAS_TF, "setup": config.SETUP_TF, "confirm": config.CONFIRM_TF},
+            "strategy": {"bias": config.BIAS_TF, "setup": config.SETUP_TF, "confirm": config.CONFIRM_TF,
+                         "retest_max_m15": config.RETEST_MAX_BARS_M15,
+                         "risk_pct": config.RISK_PER_TRADE_PCT,
+                         "best_risk_pct": config.BEST_SETUP_RISK_PCT,
+                         "daily_loss_pct": config.MAX_DAILY_LOSS_PCT,
+                         "max_consecutive_losses": config.MAX_CONSECUTIVE_LOSSES,
+                         "tp1_close_pct": config.TP1_CLOSE_PCT * 100,
+                         "be_trigger_r": config.BE_TRIGGER_R},
             "backfill": {"fx_requests": bf.get("_fx_req", 0), "fx_budget": backfill.FX_BUDGET,
                          "done": {s: all(v.get("done") for v in bf.get(s, {}).values()) if bf.get(s) else False
                                   for s in pairs}},

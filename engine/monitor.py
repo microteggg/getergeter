@@ -1,4 +1,4 @@
-"""Monitoring kejadian & setup v19 (OBSERVATION MODE – bukan sinyal BUY/SELL).
+"""Monitoring pasar v23; notif otomatis hanya pembentukan FVG/OB valid.
 
 Dipindai pada MONITOR_TF (default M15), hanya candle tertutup, tanpa lookahead:
   STRUCTURE       BOS / CHoCH swing (iBOS/iCHoCH bila MONITOR_INTERNAL_STRUCTURE)
@@ -65,6 +65,9 @@ class Monitor:
             ev_at.setdefault(e["index"], []).append(e)
         for s in smc.get("sweeps") or []:
             sw_at.setdefault(s["index"], []).append(s)
+        seq_at = {}
+        for s in smc.get("sequences") or []:
+            seq_at.setdefault(s["event"]["index"], []).append(s)
         lo_c = start - 150
         obs = [z for z in (smc.get("order_blocks") or []) + (smc.get("ob_mitigated") or []) if z["created"] >= lo_c]
         fvgs = [z for z in (smc.get("fvg") or []) + (smc.get("fvg_mit") or []) if z["created"] >= lo_c]
@@ -116,15 +119,25 @@ class Monitor:
                     [f"Wick menembus {s['side']} {_r(s['level'], d)} lalu close kembali",
                      f"Ekstrem sweep {_r(s['price'], d)} · {s.get('pool_touches', 1)} sentuhan pool"],
                     rid=f"MN:SWEEP:{s['id']}", level=_r(s["level"], d))
-            # ---- POI baru ----
-            for kind, z in pois:
-                if z["created"] != j:
-                    continue
-                tag = "FVG" if kind == "FVG" else ("sOB" if z.get("scope") == "swing" else "iOB")
-                add(j, "FVG_NEW" if kind == "FVG" else "OB_NEW", z["dir"],
-                    f"{'Bullish' if z['dir'] == 'bull' else 'Bearish'} {tag} terbentuk",
-                    [f"Area {_r(z['bottom'], d)} – {_r(z['top'], d)}"],
-                    rid=f"MN:NEW:{z['id']}", top=_r(z["top"], d), bottom=_r(z["bottom"], d), kind=tag)
+            # ---- POI valid baru ----
+            # Validasi dikirim pada close BOS/MSS sequence (bukan saat gap/candle asal
+            # belum punya konteks). FVG wajib mempunyai OB pada sequence yang sama.
+            for seq in seq_at.get(j, []):
+                ob, fvg = seq.get("ob"), seq.get("fvg")
+                if ob:
+                    tag = "sOB" if ob.get("scope") == "swing" else "iOB"
+                    add(j, "OB_NEW", ob["dir"], f"{'Bullish' if ob['dir'] == 'bull' else 'Bearish'} {tag} valid",
+                        [f"Area {_r(ob['bottom'], d)} – {_r(ob['top'], d)}",
+                         f"Tervalidasi {seq['type']} close + sweep + displacement"],
+                        rid=f"MN:VALID:OB:{seq['id']}:{ob['id']}", top=_r(ob["top"], d),
+                        bottom=_r(ob["bottom"], d), kind=tag, sequence_id=seq["id"])
+                if fvg and ob:
+                    add(j, "FVG_NEW", fvg["dir"], f"{'Bullish' if fvg['dir'] == 'bull' else 'Bearish'} FVG valid",
+                        [f"Area {_r(fvg['bottom'], d)} – {_r(fvg['top'], d)}",
+                         f"Tidak berdiri sendiri: satu sequence dengan {('sOB' if ob.get('scope') == 'swing' else 'iOB')}",
+                         f"Tervalidasi {seq['type']} close + sweep + displacement"],
+                        rid=f"MN:VALID:FVG:{seq['id']}:{fvg['id']}", top=_r(fvg["top"], d),
+                        bottom=_r(fvg["bottom"], d), kind="FVG+OB", sequence_id=seq["id"])
             # ---- POI retest: overlap & confluence ----
             for kind, z in pois:
                 if not alive(z, j) or z["created"] >= j - 1:
