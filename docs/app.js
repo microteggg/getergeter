@@ -1,4 +1,4 @@
-/* Market Monitor v22-poi-audit – persistent FVG/OB history + Phase 1 Intelligence.
+/* Market Monitor v23-final-rules – BUY/SELL final + persistent FVG/OB history + Phase 1 Intelligence.
    Market Monitor v20 – + HTF POI (FVG/OB H4 -> CHoCH M15 -> BOS M15) di panel Monitoring Events & chart.
    Market Monitor v19 – MODE MONITORING
    (sinyal BUY/SELL disembunyikan, panel Monitoring Events dari monitor_{PAIR}.json), preset tampilan Minimal,
